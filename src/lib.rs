@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, io::Read, path::Path};
 
 mod listener;
 mod peer;
+mod peer_protocol;
 pub mod torrent;
 
 type Index = u32;
@@ -56,25 +57,37 @@ impl Manix {
         }
     }
 
-    pub fn pause_torrent(&mut self, info_hash: &str) {
-        todo!()
+    fn get_torrent_mut(&mut self, info_hash: &str) -> Result<&mut Torrent, std::io::Error> {
+        let torrent = self.torrents.get_mut(info_hash);
+        if let Some(torrent) = torrent {
+            Ok(torrent)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Could not find torrent for info hash {}", info_hash),
+            ))
+        }
     }
-    pub fn delete_torrent(&mut self, info_hash: &str) {
-        todo!()
+
+    pub fn start_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
+        let torrent = self.get_torrent_mut(info_hash)?;
+        torrent.start()
     }
+
+    pub fn pause_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
+        let torrent = self.get_torrent_mut(info_hash)?;
+        torrent.pause()
+    }
+
+    pub fn delete_torrent(&mut self, info_hash: &str) -> Option<Torrent> {
+        self.torrents.remove(info_hash)
+    }
+
     pub fn delete_data(&mut self, info_hash: &str) {
         todo!()
     }
 
     pub fn list_torrents(&self) -> Vec<Torrent> {
         todo!()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
     }
 }

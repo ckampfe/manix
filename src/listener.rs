@@ -10,7 +10,11 @@ pub(crate) struct Listener {
 }
 
 impl Listener {
-    pub(crate) fn new(port: Port) -> Result<Self, std::io::Error> {
+    pub(crate) fn new(
+        port: Port,
+        peer_id: [u8; 20],
+        info_hash: [u8; 20],
+    ) -> Result<Self, std::io::Error> {
         // TODO make this configurable
         let handle = tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
@@ -18,8 +22,8 @@ impl Listener {
             loop {
                 let (socket, _socket_addr) = listener.accept().await?;
                 // process_socket(socket).await;
-                tokio::spawn(async {
-                    let _ = Peer::new(socket).await;
+                tokio::spawn(async move {
+                    let _ = Peer::new(socket, peer_id, info_hash).await;
                 });
             }
         });
