@@ -25,6 +25,7 @@ pub(crate) const REQUEST: u8 = 6;
 pub(crate) const PIECE: u8 = 7;
 pub(crate) const CANCEL: u8 = 8;
 
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Message {
     /// empty
     Keepalive,
@@ -226,7 +227,8 @@ impl TryFrom<Vec<u8>> for Message {
                 let protocol_extension_bytes: [u8; 8] = protocol_extension_bytes
                     .try_into()
                     .expect("Protocol extension bytes must be length 20");
-                let peer_id: [u8; 20] = peer_id.try_into().expect("Peer ID must be length 20");
+                let peer_id: [u8; 20] =
+                    peer_id[..20].try_into().expect("Peer ID must be length 20");
                 let info_hash: [u8; 20] =
                     info_hash.try_into().expect("Info hash must be length 20");
 
@@ -454,5 +456,150 @@ mod tests {
         expected.extend_from_slice(&info_hash);
 
         assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn decode_keepalive() {
+        let m = vec![];
+        assert_eq!(Message::try_from(m).unwrap(), Message::Keepalive);
+    }
+
+    #[test]
+    fn decode_choke() {
+        let m = vec![CHOKE];
+        assert_eq!(Message::try_from(m).unwrap(), Message::Choke);
+    }
+
+    #[test]
+    fn decode_unchoke() {
+        let m = vec![UNCHOKE];
+        assert_eq!(Message::try_from(m).unwrap(), Message::Unchoke);
+    }
+
+    #[test]
+    fn decode_interested() {
+        let m = vec![INTERESTED];
+        assert_eq!(Message::try_from(m).unwrap(), Message::Interested);
+    }
+
+    #[test]
+    fn decode_not_interested() {
+        let m = vec![NOT_INTERESTED];
+        assert_eq!(Message::try_from(m).unwrap(), Message::NotInterested);
+    }
+
+    #[test]
+    fn decode_have() {
+        let m = vec![HAVE, 0, 0, 0, 44];
+        assert_eq!(Message::try_from(m).unwrap(), Message::Have { index: 44 });
+    }
+
+    #[test]
+    fn decode_bitfield() {
+        let bitfield: BitVec<Lsb0, u8> = bitvec![Lsb0, u8; 0, 0, 0, 1, 0, 1, 0, 0];
+        let m = vec![BITFIELD, 40];
+        assert_eq!(
+            Message::try_from(m).unwrap(),
+            Message::Bitfield { bitfield }
+        );
+    }
+
+    #[test]
+    fn decode_request() {
+        let mut m = vec![];
+
+        let index = 11;
+        let begin = 0;
+        let length = 2u32.pow(14);
+
+        m.push(REQUEST);
+        m.extend_from_slice(&encode_number(index));
+        m.extend_from_slice(&encode_number(begin));
+        m.extend_from_slice(&encode_number(length));
+
+        assert_eq!(
+            Message::try_from(m).unwrap(),
+            Message::Request {
+                index,
+                begin,
+                length
+            }
+        )
+    }
+
+    #[test]
+    fn decode_piece() {
+        let mut m = vec![];
+
+        let index = 31;
+        let begin = 2u32.pow(14);
+        let chunk = vec![1; 2usize.pow(14)];
+        let cloned_chunk = chunk.clone();
+
+        let expected_index = encode_number(index);
+        let expected_begin = encode_number(begin);
+
+        m.push(PIECE);
+        m.extend_from_slice(&expected_index);
+        m.extend_from_slice(&expected_begin);
+        m.extend_from_slice(&cloned_chunk);
+
+        assert_eq!(
+            Message::try_from(m).unwrap(),
+            Message::Piece {
+                index,
+                begin,
+                chunk
+            }
+        )
+    }
+
+    #[test]
+    fn decode_cancel() {
+        let mut m = vec![];
+
+        let index = 11;
+        let begin = 0;
+        let length = 2u32.pow(14);
+
+        m.push(CANCEL);
+        m.extend_from_slice(&encode_number(index));
+        m.extend_from_slice(&encode_number(begin));
+        m.extend_from_slice(&encode_number(length));
+
+        assert_eq!(
+            Message::try_from(m).unwrap(),
+            Message::Cancel {
+                index,
+                begin,
+                length
+            }
+        )
+    }
+
+    #[test]
+    fn decode_handshake() {
+        let mut m = vec![];
+
+        let peer_id = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        ];
+        let info_hash = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        ];
+
+        m.push(19);
+        m.extend_from_slice(BITTORRENT_PROTOCOL);
+        m.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
+        m.extend_from_slice(&peer_id);
+        m.extend_from_slice(&info_hash);
+        assert_eq!(
+            Message::try_from(m).unwrap(),
+            Message::Handshake {
+                protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
+                peer_id,
+                info_hash
+            }
+        );
     }
 }

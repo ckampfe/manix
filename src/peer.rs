@@ -6,7 +6,10 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::{peer_protocol, Begin, Index, Length};
+use crate::{
+    peer_protocol::{self, HANDSHAKE_LENGTH},
+    Begin, Index, Length,
+};
 
 pub(crate) struct Peer {
     socket: tokio::net::TcpStream,
@@ -136,6 +139,14 @@ impl Peer {
         // in order for it to be filled by `read_exact`?
         let mut buf = Vec::with_capacity(message_length as usize);
 
+        self.socket.read_exact(&mut buf).await?;
+
+        peer_protocol::Message::try_from(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn receive_handshake(&mut self) -> Result<peer_protocol::Message, std::io::Error> {
+        let mut buf = Vec::with_capacity(HANDSHAKE_LENGTH);
         self.socket.read_exact(&mut buf).await?;
 
         peer_protocol::Message::try_from(buf)
