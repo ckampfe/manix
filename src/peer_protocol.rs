@@ -25,7 +25,7 @@ pub(crate) const REQUEST: u8 = 6;
 pub(crate) const PIECE: u8 = 7;
 pub(crate) const CANCEL: u8 = 8;
 
-pub(crate) enum PeerMessage {
+pub(crate) enum Message {
     /// empty
     Keepalive,
     /// 0
@@ -67,42 +67,42 @@ pub(crate) enum PeerMessage {
     },
 }
 
-impl From<PeerMessage> for Vec<u8> {
-    fn from(msg: PeerMessage) -> Vec<u8> {
+impl From<Message> for Vec<u8> {
+    fn from(msg: Message) -> Vec<u8> {
         match msg {
-            PeerMessage::Keepalive => vec![],
-            PeerMessage::Choke => {
+            Message::Keepalive => vec![],
+            Message::Choke => {
                 let mut bytes = Vec::with_capacity(5);
                 bytes.extend_from_slice(&1u32.to_be_bytes());
                 bytes.push(CHOKE);
                 bytes
             }
-            PeerMessage::Unchoke => {
+            Message::Unchoke => {
                 let mut bytes = Vec::with_capacity(5);
                 bytes.extend_from_slice(&1u32.to_be_bytes());
                 bytes.push(UNCHOKE);
                 bytes
             }
-            PeerMessage::Interested => {
+            Message::Interested => {
                 let mut bytes = Vec::with_capacity(5);
                 bytes.extend_from_slice(&1u32.to_be_bytes());
                 bytes.push(INTERESTED);
                 bytes
             }
-            PeerMessage::NotInterested => {
+            Message::NotInterested => {
                 let mut bytes = Vec::with_capacity(5);
                 bytes.extend_from_slice(&1u32.to_be_bytes());
                 bytes.push(NOT_INTERESTED);
                 bytes
             }
-            PeerMessage::Have { index } => {
+            Message::Have { index } => {
                 let mut bytes = Vec::with_capacity(9);
                 bytes.extend_from_slice(&5u32.to_be_bytes());
                 bytes.push(HAVE);
                 bytes.extend_from_slice(&index.to_be_bytes());
                 bytes
             }
-            PeerMessage::Bitfield { bitfield } => {
+            Message::Bitfield { bitfield } => {
                 let bitfield_as_bytes = bitfield.as_raw_slice();
                 let mut bytes = Vec::with_capacity(4 + 1 + bitfield_as_bytes.len());
                 bytes.extend_from_slice(&encode_number(1 + bitfield_as_bytes.len() as u32));
@@ -111,7 +111,7 @@ impl From<PeerMessage> for Vec<u8> {
                 todo!("this bitfield impl is probably wrong and needs to be tested");
                 bytes
             }
-            PeerMessage::Request {
+            Message::Request {
                 index,
                 begin,
                 length,
@@ -124,7 +124,7 @@ impl From<PeerMessage> for Vec<u8> {
                 bytes.extend_from_slice(&encode_number(length));
                 bytes
             }
-            PeerMessage::Piece {
+            Message::Piece {
                 index,
                 begin,
                 chunk,
@@ -137,7 +137,7 @@ impl From<PeerMessage> for Vec<u8> {
                 bytes.extend_from_slice(&chunk);
                 bytes
             }
-            PeerMessage::Cancel {
+            Message::Cancel {
                 index,
                 begin,
                 length,
@@ -150,7 +150,7 @@ impl From<PeerMessage> for Vec<u8> {
                 bytes.extend_from_slice(&encode_number(length));
                 bytes
             }
-            PeerMessage::Handshake {
+            Message::Handshake {
                 protocol_extension_bytes,
                 peer_id,
                 info_hash,
@@ -167,21 +167,21 @@ impl From<PeerMessage> for Vec<u8> {
     }
 }
 
-impl TryFrom<Vec<u8>> for PeerMessage {
+impl TryFrom<Vec<u8>> for Message {
     type Error = String;
 
     #[allow(clippy::many_single_char_names)]
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         match &value[..] {
-            [] => Ok(PeerMessage::Keepalive),
-            [CHOKE] => Ok(PeerMessage::Choke),
-            [UNCHOKE] => Ok(PeerMessage::Unchoke),
-            [INTERESTED] => Ok(PeerMessage::Interested),
-            [NOT_INTERESTED] => Ok(PeerMessage::NotInterested),
-            [HAVE, a, b, c, d] => Ok(PeerMessage::Have {
+            [] => Ok(Message::Keepalive),
+            [CHOKE] => Ok(Message::Choke),
+            [UNCHOKE] => Ok(Message::Unchoke),
+            [INTERESTED] => Ok(Message::Interested),
+            [NOT_INTERESTED] => Ok(Message::NotInterested),
+            [HAVE, a, b, c, d] => Ok(Message::Have {
                 index: decode_number([*a, *b, *c, *d]),
             }),
-            [BITFIELD, bitfield @ ..] => Ok(PeerMessage::Bitfield {
+            [BITFIELD, bitfield @ ..] => Ok(Message::Bitfield {
                 bitfield: BitVec::<bitvec::order::Lsb0, u8>::from_slice(bitfield)
                     .map_err(|e| e.to_string())?,
             }),
@@ -190,7 +190,7 @@ impl TryFrom<Vec<u8>> for PeerMessage {
                 let begin = decode_number([*e, *f, *g, *h]);
                 let length = decode_number([*i, *j, *k, *l]);
 
-                Ok(PeerMessage::Request {
+                Ok(Message::Request {
                     index,
                     begin,
                     length,
@@ -201,7 +201,7 @@ impl TryFrom<Vec<u8>> for PeerMessage {
                 let begin = decode_number([*e, *f, *g, *h]);
                 let chunk = chunk.to_owned();
 
-                Ok(PeerMessage::Piece {
+                Ok(Message::Piece {
                     index,
                     begin,
                     chunk,
@@ -212,7 +212,7 @@ impl TryFrom<Vec<u8>> for PeerMessage {
                 let begin = decode_number([*e, *f, *g, *h]);
                 let length = decode_number([*i, *j, *k, *l]);
 
-                Ok(PeerMessage::Cancel {
+                Ok(Message::Cancel {
                     index,
                     begin,
                     length,
@@ -231,7 +231,7 @@ impl TryFrom<Vec<u8>> for PeerMessage {
                 let info_hash: [u8; 20] =
                     info_hash.try_into().expect("Info hash must be length 20");
 
-                Ok(PeerMessage::Handshake {
+                Ok(Message::Handshake {
                     protocol_extension_bytes,
                     peer_id,
                     info_hash,

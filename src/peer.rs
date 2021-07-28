@@ -3,14 +3,10 @@ use std::convert::TryFrom;
 use bitvec::{order::Lsb0, prelude::BitVec};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, ToSocketAddrs},
+    net::TcpStream,
 };
 
-use crate::peer_protocol::{
-    BITFIELD, CANCEL, CHOKE, HANDSHAKE_LENGTH, HAVE, INTERESTED, NOT_INTERESTED, PIECE,
-    PROTOCOL_EXTENSION_HEADER, REQUEST, UNCHOKE,
-};
-use crate::{peer_protocol, torrent, Begin, Index, Length};
+use crate::{peer_protocol, Begin, Index, Length};
 
 pub(crate) struct Peer {
     socket: tokio::net::TcpStream,
@@ -44,8 +40,8 @@ impl Peer {
         let peer_id = self.get_peer_id_machine_readable();
         let info_hash = self.get_info_hash();
 
-        self.send_message(peer_protocol::PeerMessage::Handshake {
-            protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
+        self.send_message(peer_protocol::Message::Handshake {
+            protocol_extension_bytes: peer_protocol::PROTOCOL_EXTENSION_HEADER,
             peer_id,
             info_hash,
         })
@@ -53,35 +49,33 @@ impl Peer {
     }
 
     async fn send_keepalive(&mut self) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Keepalive)
-            .await
+        self.send_message(peer_protocol::Message::Keepalive).await
     }
 
     async fn send_choke(&mut self) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Choke).await
+        self.send_message(peer_protocol::Message::Choke).await
     }
 
     async fn send_unchoke(&mut self) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Unchoke).await
+        self.send_message(peer_protocol::Message::Unchoke).await
     }
 
     async fn send_interested(&mut self) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Interested)
-            .await
+        self.send_message(peer_protocol::Message::Interested).await
     }
 
     async fn send_not_interested(&mut self) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::NotInterested)
+        self.send_message(peer_protocol::Message::NotInterested)
             .await
     }
 
     async fn send_have(&mut self, index: Index) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Have { index })
+        self.send_message(peer_protocol::Message::Have { index })
             .await
     }
 
     async fn send_bitfield(&mut self, bitfield: BitVec<Lsb0, u8>) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Bitfield { bitfield })
+        self.send_message(peer_protocol::Message::Bitfield { bitfield })
             .await
     }
 
@@ -91,7 +85,7 @@ impl Peer {
         begin: Begin,
         length: Length,
     ) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Request {
+        self.send_message(peer_protocol::Message::Request {
             index,
             begin,
             length,
@@ -105,7 +99,7 @@ impl Peer {
         begin: Begin,
         chunk: Vec<u8>,
     ) -> Result<(), std::io::Error> {
-        self.send_message(peer_protocol::PeerMessage::Piece {
+        self.send_message(peer_protocol::Message::Piece {
             index,
             begin,
             chunk,
@@ -119,13 +113,7 @@ impl Peer {
         begin: Begin,
         length: Length,
     ) -> Result<(), std::io::Error> {
-        let index_bytes = peer_protocol::encode_number(index);
-        let begin_bytes = peer_protocol::encode_number(begin);
-        let length_bytes = peer_protocol::encode_number(length);
-
-        let buf = [[CANCEL].as_ref(), &index_bytes, &begin_bytes, &length_bytes].concat();
-
-        self.send_message(peer_protocol::PeerMessage::Cancel {
+        self.send_message(peer_protocol::Message::Cancel {
             index,
             begin,
             length,
@@ -135,13 +123,13 @@ impl Peer {
 
     async fn send_message(
         &mut self,
-        message: peer_protocol::PeerMessage,
+        message: peer_protocol::Message,
     ) -> Result<(), std::io::Error> {
         let bytes: Vec<u8> = message.into();
         self.socket.write_all(&bytes).await
     }
 
-    async fn receive_message(&mut self) -> Result<peer_protocol::PeerMessage, std::io::Error> {
+    async fn receive_message(&mut self) -> Result<peer_protocol::Message, std::io::Error> {
         let message_length = self.receive_length().await?;
 
         // TODO: does this need to be fully initialized with 0u8 values
@@ -150,7 +138,7 @@ impl Peer {
 
         self.socket.read_exact(&mut buf).await?;
 
-        peer_protocol::PeerMessage::try_from(buf)
+        peer_protocol::Message::try_from(buf)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 

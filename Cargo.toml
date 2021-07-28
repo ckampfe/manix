@@ -6,10 +6,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# nom_bencode = { git = "https://github.com/ckampfe/nom_bencode" }
 bitvec = "0.22"
 hex = "0.4"
-nom_bencode = { path = "/home/clark/code/personal/nom_bencode" }
+nom_bencode = { git = "https://github.com/ckampfe/nom_bencode" }
 reqwest = "0.11"
 tokio = { version = "1", features = ["full"] }
 sha-1 = "0.9"
