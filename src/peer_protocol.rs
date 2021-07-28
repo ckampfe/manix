@@ -4,13 +4,13 @@ use crate::{Begin, Index, Length};
 use bitvec::prelude::BitVec;
 
 const HANDSHAKE_LENGTH_LENGTH: usize = 1;
-const BITORRENT_PROCOTOL: &[u8] = b"BitTorrent protocol";
+const BITTORRENT_PROTOCOL: &[u8] = b"BitTorrent protocol";
 pub(crate) const PROTOCOL_EXTENSION_HEADER: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
 const INFO_HASH_LENGTH: usize = 20;
 const PEER_ID_LENGTH: usize = 20;
 
 pub(crate) const HANDSHAKE_LENGTH: usize = HANDSHAKE_LENGTH_LENGTH
-    + BITORRENT_PROCOTOL.len()
+    + BITTORRENT_PROTOCOL.len()
     + PROTOCOL_EXTENSION_HEADER.len()
     + INFO_HASH_LENGTH
     + PEER_ID_LENGTH;
@@ -108,7 +108,6 @@ impl From<Message> for Vec<u8> {
                 bytes.extend_from_slice(&encode_number(1 + bitfield_as_bytes.len() as u32));
                 bytes.push(BITFIELD);
                 bytes.extend_from_slice(bitfield_as_bytes);
-                todo!("this bitfield impl is probably wrong and needs to be tested");
                 bytes
             }
             Message::Request {
@@ -157,7 +156,7 @@ impl From<Message> for Vec<u8> {
             } => {
                 let mut bytes = Vec::with_capacity(HANDSHAKE_LENGTH);
                 bytes.push(19);
-                bytes.extend_from_slice(BITORRENT_PROCOTOL);
+                bytes.extend_from_slice(BITTORRENT_PROTOCOL);
                 bytes.extend_from_slice(&protocol_extension_bytes);
                 bytes.extend_from_slice(&info_hash);
                 bytes.extend_from_slice(&peer_id);
@@ -248,4 +247,212 @@ pub(crate) fn encode_number(n: u32) -> [u8; 4] {
 
 pub(crate) fn decode_number(bytes: [u8; 4]) -> u32 {
     u32::from_be_bytes(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitvec::prelude::*;
+
+    #[test]
+    fn encode_numbers() {
+        assert_eq!(encode_number(10), [0, 0, 0, 10]);
+        assert_eq!(encode_number(u32::MIN), [0, 0, 0, 0]);
+        assert_eq!(encode_number(u32::MAX), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn encode_keepalive() {
+        let m = Message::Keepalive;
+        let encoded: Vec<u8> = m.into();
+        assert_eq!(encoded, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn encode_choke() {
+        let m = Message::Choke;
+        let encoded: Vec<u8> = m.into();
+        assert_eq!(encoded, vec![0, 0, 0, 1, CHOKE]);
+    }
+
+    #[test]
+    fn encode_unchoke() {
+        let m = Message::Unchoke;
+        let encoded: Vec<u8> = m.into();
+        assert_eq!(encoded, vec![0, 0, 0, 1, UNCHOKE]);
+    }
+
+    #[test]
+    fn encode_interested() {
+        let m = Message::Interested;
+        let encoded: Vec<u8> = m.into();
+        assert_eq!(encoded, vec![0, 0, 0, 1, INTERESTED]);
+    }
+
+    #[test]
+    fn encode_not_interested() {
+        let m = Message::NotInterested;
+        let encoded: Vec<u8> = m.into();
+        assert_eq!(encoded, vec![0, 0, 0, 1, NOT_INTERESTED]);
+    }
+
+    #[test]
+    fn encode_have() {
+        let m = Message::Have { index: 63 };
+        let encoded: Vec<u8> = m.into();
+
+        let mut expected = vec![];
+
+        let expected_index = encode_number(63);
+
+        expected.extend_from_slice(&encode_number(1 + expected_index.len() as u32));
+        expected.push(HAVE);
+        expected.extend_from_slice(&expected_index);
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn encode_bitfield() {
+        let bitfield: BitVec<Lsb0, u8> = bitvec![Lsb0, u8; 0, 0, 0, 1, 0, 1, 0, 0];
+        let bitfield_as_bytes = bitfield.as_raw_slice().to_vec();
+
+        let m = Message::Bitfield { bitfield };
+
+        let encoded: Vec<u8> = m.into();
+
+        let mut expected = vec![];
+        expected.extend_from_slice(&encode_number(1 + bitfield_as_bytes.len() as u32));
+        expected.push(BITFIELD);
+        expected.extend_from_slice(&bitfield_as_bytes);
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn encode_request() {
+        let index = 11;
+        let begin = 0;
+        let length = 2u32.pow(14);
+
+        let m = Message::Request {
+            index,
+            begin,
+            length,
+        };
+
+        let encoded: Vec<u8> = m.into();
+
+        let expected_index = encode_number(index);
+        let expected_begin = encode_number(begin);
+        let expected_length = encode_number(length);
+
+        let mut expected = vec![];
+
+        expected.extend_from_slice(&encode_number(
+            1 + expected_index.len() as u32
+                + expected_begin.len() as u32
+                + expected_length.len() as u32,
+        ));
+        expected.push(REQUEST);
+        expected.extend_from_slice(&expected_index);
+        expected.extend_from_slice(&expected_begin);
+        expected.extend_from_slice(&expected_length);
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn encode_piece() {
+        let index = 31;
+        let begin = 2u32.pow(14);
+        let chunk = vec![1; 2usize.pow(14)];
+        let cloned_chunk = chunk.clone();
+
+        let m = Message::Piece {
+            index,
+            begin,
+            chunk,
+        };
+
+        let encoded: Vec<u8> = m.into();
+
+        let expected_index = encode_number(index);
+        let expected_begin = encode_number(begin);
+
+        let mut expected = vec![];
+
+        expected.extend_from_slice(&encode_number(
+            1 + expected_index.len() as u32
+                + expected_begin.len() as u32
+                + cloned_chunk.len() as u32,
+        ));
+        expected.push(PIECE);
+        expected.extend_from_slice(&expected_index);
+        expected.extend_from_slice(&expected_begin);
+        expected.extend_from_slice(&cloned_chunk);
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn encode_cancel() {
+        let index = 11;
+        let begin = 0;
+        let length = 2u32.pow(14);
+
+        let m = Message::Cancel {
+            index,
+            begin,
+            length,
+        };
+
+        let encoded: Vec<u8> = m.into();
+
+        let expected_index = encode_number(index);
+        let expected_begin = encode_number(begin);
+        let expected_length = encode_number(length);
+
+        let mut expected = vec![];
+
+        expected.extend_from_slice(&encode_number(
+            1 + expected_index.len() as u32
+                + expected_begin.len() as u32
+                + expected_length.len() as u32,
+        ));
+        expected.push(CANCEL);
+        expected.extend_from_slice(&expected_index);
+        expected.extend_from_slice(&expected_begin);
+        expected.extend_from_slice(&expected_length);
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn encode_handshake() {
+        let peer_id = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        ];
+        let info_hash = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        ];
+
+        let m = Message::Handshake {
+            protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
+            peer_id,
+            info_hash,
+        };
+
+        let encoded: Vec<u8> = m.into();
+
+        let mut expected = vec![];
+
+        expected.push(19);
+        expected.extend_from_slice(&BITTORRENT_PROTOCOL);
+        expected.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
+        expected.extend_from_slice(&peer_id);
+        expected.extend_from_slice(&info_hash);
+
+        assert_eq!(encoded, expected);
+    }
 }
