@@ -8,17 +8,17 @@ use tokio::{
 
 use crate::{
     peer_protocol::{self, HANDSHAKE_LENGTH},
-    Begin, Index, Length,
+    Begin, Index, InfoHash, Length, PeerId,
 };
 
 pub(crate) struct Peer {
     socket: tokio::net::TcpStream,
-    peer_id: [u8; 20],
-    info_hash: [u8; 20],
+    peer_id: PeerId,
+    info_hash: InfoHash,
 }
 
 impl Peer {
-    pub(crate) async fn new(socket: TcpStream, peer_id: [u8; 20], info_hash: [u8; 20]) -> Self {
+    pub(crate) async fn new(socket: TcpStream, peer_id: PeerId, info_hash: InfoHash) -> Self {
         Self {
             socket,
             peer_id,
@@ -31,11 +31,11 @@ impl Peer {
     //     Ok(Self { socket })
     // }
 
-    fn get_info_hash(&self) -> [u8; 20] {
+    fn get_info_hash(&self) -> InfoHash {
         self.info_hash
     }
 
-    fn get_peer_id_machine_readable(&self) -> [u8; 20] {
+    fn get_peer_id_machine_readable(&self) -> PeerId {
         self.peer_id
     }
 

@@ -1,6 +1,6 @@
 use std::convert::{TryFrom, TryInto};
 
-use crate::{Begin, Index, Length};
+use crate::{Begin, Index, InfoHash, Length, PeerId};
 use bitvec::prelude::BitVec;
 
 const HANDSHAKE_LENGTH_LENGTH: usize = 1;
@@ -63,8 +63,8 @@ pub(crate) enum Message {
     },
     Handshake {
         protocol_extension_bytes: [u8; 8],
-        peer_id: [u8; 20],
-        info_hash: [u8; 20],
+        peer_id: PeerId,
+        info_hash: InfoHash,
     },
 }
 
@@ -227,9 +227,8 @@ impl TryFrom<Vec<u8>> for Message {
                 let protocol_extension_bytes: [u8; 8] = protocol_extension_bytes
                     .try_into()
                     .expect("Protocol extension bytes must be length 20");
-                let peer_id: [u8; 20] =
-                    peer_id[..20].try_into().expect("Peer ID must be length 20");
-                let info_hash: [u8; 20] =
+                let peer_id: PeerId = peer_id[..20].try_into().expect("Peer ID must be length 20");
+                let info_hash: InfoHash =
                     info_hash.try_into().expect("Info hash must be length 20");
 
                 Ok(Message::Handshake {

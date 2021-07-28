@@ -10,6 +10,8 @@ type Index = u32;
 type Begin = u32;
 type Length = u32;
 type Port = u16;
+type InfoHash = [u8; 20];
+type PeerId = [u8; 20];
 
 pub struct Manix {
     torrents: BTreeMap<String, Torrent>,

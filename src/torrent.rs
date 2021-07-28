@@ -1,6 +1,6 @@
 use sha1::Digest;
 
-use crate::{listener, Port};
+use crate::{listener, InfoHash, PeerId, Port};
 use std::{convert::TryInto, fmt::Display};
 
 pub struct TorrentOptions {
@@ -24,8 +24,8 @@ pub struct Torrent {
     port: Port,
     uploaded: usize,
     downloaded: usize,
-    peer_id: [u8; 20],
-    info_hash: [u8; 20],
+    peer_id: PeerId,
+    info_hash: InfoHash,
     listener: listener::Listener,
 }
 
@@ -65,7 +65,7 @@ impl Torrent {
         hex::encode(info_hash)
     }
 
-    pub fn get_info_hash_machine(&self) -> [u8; 20] {
+    pub fn get_info_hash_machine(&self) -> InfoHash {
         self.info_hash
     }
 
@@ -82,7 +82,7 @@ impl Torrent {
         }
     }
 
-    pub fn get_peer_id(&self) -> [u8; 20] {
+    pub fn get_peer_id(&self) -> PeerId {
         self.peer_id
     }
 
@@ -159,12 +159,12 @@ impl Display for AnnounceEvent {
     }
 }
 
-pub(crate) fn generate_peer_id() -> [u8; 20] {
+pub(crate) fn generate_peer_id() -> PeerId {
     let x: &[u8] = b"foooooooo00000000000";
     x.try_into().unwrap()
 }
 
-pub fn info_hash(bencode: &nom_bencode::Bencode) -> [u8; 20] {
+pub fn info_hash(bencode: &nom_bencode::Bencode) -> InfoHash {
     match bencode {
         nom_bencode::Bencode::Dictionary(d) => {
             let info = d.get(&b"info".to_vec()).unwrap();
