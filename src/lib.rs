@@ -40,14 +40,18 @@ impl Manix {
         let options = torrent::TorrentOptions::default();
         let torrent = Torrent::new(options, dot_torrent_bencode)?;
         // has it already been loaded?
-        let human_readable_info_hash = torrent.get_info_hash_human();
-        if self.torrents.contains_key(&human_readable_info_hash) {
-            return Err(std::io::Error::new(
+        if let std::collections::btree_map::Entry::Vacant(e) =
+            self.torrents.entry(torrent.get_info_hash_human())
+        {
+            // if not, add it and return a reference to its Torrent
+            Ok(e.insert(torrent))
+        } else {
+            Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!(
                     "{:?} (info_hash {}) already exists",
                     path.as_os_str(),
-                    human_readable_info_hash
+                    torrent.get_info_hash_human()
                 ),
             ));
         } else {
