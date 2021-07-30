@@ -126,7 +126,7 @@ impl Torrent {
         let info_hash = self.get_info_hash_human();
         let port = self.get_port().to_string();
         let peer_id = self.get_peer_id();
-        let peer_id = std::str::from_utf8(&peer_id).unwrap();
+        let peer_id = std::str::from_utf8(peer_id.as_ref()).unwrap();
 
         let mut params = vec![
             ("info_hash", info_hash.as_str()),
@@ -178,7 +178,7 @@ impl Display for AnnounceEvent {
 
 pub(crate) fn generate_peer_id() -> PeerId {
     let x: &[u8] = b"foooooooo00000000000";
-    x.try_into().unwrap()
+    PeerId(x.try_into().unwrap())
 }
 
 pub fn info_hash(bencode: &nom_bencode::Bencode) -> InfoHash {
@@ -193,7 +193,7 @@ pub fn info_hash(bencode: &nom_bencode::Bencode) -> InfoHash {
             // acquire hash digest in the form of GenericArray,
             // which in this case is equivalent to [u8; 20]
             let result = hasher.finalize();
-            result.try_into().expect("info hash must be 20 bytes")
+            InfoHash(result.try_into().expect("info hash must be 20 bytes"))
         }
         _ => panic!(".torrent bencode must be a dictionary"),
     }

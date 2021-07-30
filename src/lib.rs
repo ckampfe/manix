@@ -10,8 +10,6 @@ type Index = u32;
 type Begin = u32;
 type Length = u32;
 type Port = u16;
-type InfoHash = [u8; 20];
-type PeerId = [u8; 20];
 
 pub struct Manix {
     torrents: BTreeMap<String, Torrent>,
@@ -105,5 +103,35 @@ impl Default for ManixOptions {
         Self {
             max_peer_connections: 500,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeerId([u8; 20]);
+
+impl From<[u8; 20]> for PeerId {
+    fn from(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for PeerId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InfoHash([u8; 20]);
+
+impl From<[u8; 20]> for InfoHash {
+    fn from(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for InfoHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }

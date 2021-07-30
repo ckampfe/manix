@@ -3,10 +3,10 @@ use std::sync::Arc;
 use futures_util::future::TryFutureExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tokio::{join, try_join};
+use tokio::try_join;
 
 use crate::peer::{Peer, PeerToTorrent};
-use crate::Port;
+use crate::{InfoHash, PeerId, Port};
 
 pub(crate) struct Listener {
     port: Port,
@@ -16,8 +16,8 @@ pub(crate) struct Listener {
 impl Listener {
     pub(crate) fn new(
         port: Port,
-        peer_id: [u8; 20],
-        info_hash: [u8; 20],
+        peer_id: PeerId,
+        info_hash: InfoHash,
         max_peer_connections: Arc<tokio::sync::Semaphore>,
         peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
     ) -> Result<Self, std::io::Error> {

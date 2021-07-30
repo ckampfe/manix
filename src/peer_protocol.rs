@@ -159,8 +159,8 @@ impl From<Message> for Vec<u8> {
                 bytes.push(19);
                 bytes.extend_from_slice(BITTORRENT_PROTOCOL);
                 bytes.extend_from_slice(&protocol_extension_bytes);
-                bytes.extend_from_slice(&info_hash);
-                bytes.extend_from_slice(&peer_id);
+                bytes.extend_from_slice(info_hash.as_ref());
+                bytes.extend_from_slice(peer_id.as_ref());
                 bytes
             }
         }
@@ -227,9 +227,10 @@ impl TryFrom<Vec<u8>> for Message {
                 let protocol_extension_bytes: [u8; 8] = protocol_extension_bytes
                     .try_into()
                     .expect("Protocol extension bytes must be length 20");
-                let peer_id: PeerId = peer_id[..20].try_into().expect("Peer ID must be length 20");
+                let peer_id: PeerId =
+                    PeerId(peer_id[..20].try_into().expect("Peer ID must be length 20"));
                 let info_hash: InfoHash =
-                    info_hash.try_into().expect("Info hash must be length 20");
+                    InfoHash(info_hash.try_into().expect("Info hash must be length 20"));
 
                 Ok(Message::Handshake {
                     protocol_extension_bytes,
@@ -431,12 +432,12 @@ mod tests {
 
     #[test]
     fn encode_handshake() {
-        let peer_id = [
+        let peer_id = PeerId([
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ];
-        let info_hash = [
+        ]);
+        let info_hash = InfoHash([
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ];
+        ]);
 
         let m = Message::Handshake {
             protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
@@ -451,8 +452,8 @@ mod tests {
         expected.push(19);
         expected.extend_from_slice(&BITTORRENT_PROTOCOL);
         expected.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
-        expected.extend_from_slice(&peer_id);
-        expected.extend_from_slice(&info_hash);
+        expected.extend_from_slice(peer_id.as_ref());
+        expected.extend_from_slice(&info_hash.as_ref());
 
         assert_eq!(encoded, expected);
     }
@@ -580,18 +581,18 @@ mod tests {
     fn decode_handshake() {
         let mut m = vec![];
 
-        let peer_id = [
+        let peer_id = PeerId([
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ];
-        let info_hash = [
+        ]);
+        let info_hash = InfoHash([
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ];
+        ]);
 
         m.push(19);
         m.extend_from_slice(BITTORRENT_PROTOCOL);
         m.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
-        m.extend_from_slice(&peer_id);
-        m.extend_from_slice(&info_hash);
+        m.extend_from_slice(peer_id.as_ref());
+        m.extend_from_slice(info_hash.as_ref());
         assert_eq!(
             Message::try_from(m).unwrap(),
             Message::Handshake {
