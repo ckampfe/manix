@@ -1,5 +1,5 @@
 use crate::torrent::Torrent;
-use std::{collections::BTreeMap, io::Read, path::Path};
+use std::{collections::BTreeMap, io::Read, path::Path, sync::Arc};
 
 mod listener;
 mod peer;
@@ -15,12 +15,16 @@ type PeerId = [u8; 20];
 
 pub struct Manix {
     torrents: BTreeMap<String, Torrent>,
+    max_peer_connections: Arc<tokio::sync::Semaphore>,
 }
 
 impl Manix {
-    pub fn new() -> Self {
+    pub fn new(options: ManixOptions) -> Self {
         Self {
             torrents: BTreeMap::new(),
+            max_peer_connections: Arc::new(tokio::sync::Semaphore::new(
+                options.max_peer_connections,
+            )),
         }
     }
 
@@ -53,14 +57,30 @@ impl Manix {
                     path.as_os_str(),
                     torrent.get_info_hash_human()
                 ),
-            ));
-        } else {
-            // if not, add it
-            let cloned_key = human_readable_info_hash.clone();
-            self.torrents.insert(human_readable_info_hash, torrent);
-            // return its info hash
-            Ok(self.torrents.get(&cloned_key).unwrap())
+            ))
         }
+    }
+
+    pub async fn start_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
+        let torrent = self.get_torrent_mut(info_hash)?;
+        torrent.start().await
+    }
+
+    pub async fn pause_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
+        let torrent = self.get_torrent_mut(info_hash)?;
+        torrent.pause().await
+    }
+
+    pub fn delete_torrent(&mut self, info_hash: &str) -> Option<Torrent> {
+        self.torrents.remove(info_hash)
+    }
+
+    pub fn delete_data(&mut self, info_hash: &str) {
+        todo!()
+    }
+
+    pub fn list_torrents(&self) -> Vec<Torrent> {
+        todo!()
     }
 
     fn get_torrent_mut(&mut self, info_hash: &str) -> Result<&mut Torrent, std::io::Error> {
@@ -74,26 +94,16 @@ impl Manix {
             ))
         }
     }
+}
 
-    pub fn start_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
-        let torrent = self.get_torrent_mut(info_hash)?;
-        torrent.start()
-    }
+pub struct ManixOptions {
+    max_peer_connections: usize,
+}
 
-    pub fn pause_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
-        let torrent = self.get_torrent_mut(info_hash)?;
-        torrent.pause()
-    }
-
-    pub fn delete_torrent(&mut self, info_hash: &str) -> Option<Torrent> {
-        self.torrents.remove(info_hash)
-    }
-
-    pub fn delete_data(&mut self, info_hash: &str) {
-        todo!()
-    }
-
-    pub fn list_torrents(&self) -> Vec<Torrent> {
-        todo!()
+impl Default for ManixOptions {
+    fn default() -> Self {
+        Self {
+            max_peer_connections: 500,
+        }
     }
 }

@@ -1,12 +1,13 @@
 use sha1::Digest;
 
 use crate::{listener, InfoHash, PeerId, Port};
-use std::{convert::TryInto, fmt::Display};
+use std::{convert::TryInto, fmt::Display, sync::Arc};
 
 pub struct TorrentOptions {
     port: Port,
     torrent_channel_buffer_size: usize,
     peer_channel_buffer_size: usize,
+    max_peer_connections: usize,
 }
 
 impl Default for TorrentOptions {
@@ -15,6 +16,7 @@ impl Default for TorrentOptions {
             port: 6881,
             torrent_channel_buffer_size: 100,
             peer_channel_buffer_size: 20,
+            max_peer_connections: 25,
         }
     }
 }
@@ -26,7 +28,8 @@ pub struct Torrent {
     downloaded: usize,
     peer_id: PeerId,
     info_hash: InfoHash,
-    listener: listener::Listener,
+    listener: Option<listener::Listener>,
+    max_peer_connections: Arc<tokio::sync::Semaphore>,
 }
 
 impl Torrent {
@@ -36,28 +39,30 @@ impl Torrent {
     ) -> Result<Self, std::io::Error> {
         let peer_id = generate_peer_id();
         let info_hash = info_hash(&dot_torrent_bencode);
+        let max_peer_connections =
+            Arc::new(tokio::sync::Semaphore::new(options.max_peer_connections));
 
-        let listener = listener::Listener::new(options.port, peer_id, info_hash)?;
-
-        let s = Self {
+        Ok(Self {
             peer_id,
             dot_torrent_bencode,
             port: options.port,
             uploaded: 0,
             downloaded: 0,
             info_hash,
-            listener,
-        };
-
-        Ok(s)
+            listener: None,
+            max_peer_connections,
+        })
     }
 
-    pub(crate) fn start(&mut self) -> Result<(), std::io::Error> {
-        todo!()
+    pub(crate) async fn start(&mut self) -> Result<(), std::io::Error> {
+        let listener = listener::Listener::new(self.port, self.peer_id, self.info_hash)?;
+        self.listener = Some(listener);
+        Ok(())
     }
 
-    pub(crate) fn pause(&mut self) -> Result<(), std::io::Error> {
-        todo!()
+    pub(crate) async fn pause(&mut self) -> Result<(), std::io::Error> {
+        self.listener = None;
+        Ok(())
     }
 
     pub fn get_info_hash_human(&self) -> String {
