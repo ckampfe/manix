@@ -15,15 +15,35 @@ pub(crate) struct Peer {
     socket: tokio::net::TcpStream,
     peer_id: PeerId,
     info_hash: InfoHash,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
 }
 
 impl Peer {
-    pub(crate) async fn new(socket: TcpStream, peer_id: PeerId, info_hash: InfoHash) -> Self {
+    pub(crate) async fn new(
+        socket: TcpStream,
+        peer_id: PeerId,
+        info_hash: InfoHash,
+        peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
+    ) -> Self {
         Self {
             socket,
             peer_id,
             info_hash,
+            peer_to_torrent_tx,
         }
+    }
+
+    pub(crate) async fn enter_event_loop(
+        peer: Peer,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                // do the event loop stuff here
+            }
+
+            drop(permit)
+        })
     }
 
     // pub(crate) async fn connect<A: ToSocketAddrs>(addr: A) -> Result<Peer, std::io::Error> {
@@ -159,3 +179,5 @@ impl Peer {
         Ok(u32::from_be_bytes(length_bytes))
     }
 }
+
+pub(crate) enum PeerToTorrent {}

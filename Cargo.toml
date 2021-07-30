@@ -7,6 +7,7 @@ edition = "2018"
 
 [dependencies]
 bitvec = "0.22"
+futures-util = "0.3"
 hex = "0.4"
 nom_bencode = { git = "https://github.com/ckampfe/nom_bencode" }
 reqwest = "0.11"

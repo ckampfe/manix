@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
+use futures_util::future::TryFutureExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio::{join, try_join};
 
-use crate::peer::Peer;
+use crate::peer::{Peer, PeerToTorrent};
 use crate::Port;
 
 pub(crate) struct Listener {
@@ -14,16 +18,26 @@ impl Listener {
         port: Port,
         peer_id: [u8; 20],
         info_hash: [u8; 20],
+        max_peer_connections: Arc<tokio::sync::Semaphore>,
+        peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
     ) -> Result<Self, std::io::Error> {
         // TODO make this configurable
         let handle = tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
 
             loop {
-                let (socket, _socket_addr) = listener.accept().await?;
-                // process_socket(socket).await;
+                let max_peer_connections = max_peer_connections.clone();
+                let peer_to_torrent_tx = peer_to_torrent_tx.clone();
+
+                let permit_fut = max_peer_connections
+                    .acquire_owned()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()));
+
+                let (permit, (socket, _socket_addr)) = try_join!(permit_fut, listener.accept())?;
+
                 tokio::spawn(async move {
-                    let _ = Peer::new(socket, peer_id, info_hash).await;
+                    let peer = Peer::new(socket, peer_id, info_hash, peer_to_torrent_tx).await;
+                    let peer_event_loop_task = Peer::enter_event_loop(peer, permit);
                 });
             }
         });

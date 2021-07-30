@@ -1,12 +1,11 @@
 use sha1::Digest;
 
-use crate::{listener, InfoHash, PeerId, Port};
+use crate::{listener, peer, InfoHash, PeerId, Port};
 use std::{convert::TryInto, fmt::Display, sync::Arc};
 
 pub struct TorrentOptions {
     port: Port,
     torrent_channel_buffer_size: usize,
-    peer_channel_buffer_size: usize,
     max_peer_connections: usize,
 }
 
@@ -15,7 +14,6 @@ impl Default for TorrentOptions {
         Self {
             port: 6881,
             torrent_channel_buffer_size: 100,
-            peer_channel_buffer_size: 20,
             max_peer_connections: 25,
         }
     }
@@ -30,6 +28,8 @@ pub struct Torrent {
     info_hash: InfoHash,
     listener: Option<listener::Listener>,
     max_peer_connections: Arc<tokio::sync::Semaphore>,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<peer::PeerToTorrent>,
+    peer_to_torrent_rx: tokio::sync::mpsc::Receiver<peer::PeerToTorrent>,
 }
 
 impl Torrent {
@@ -42,6 +42,8 @@ impl Torrent {
         let max_peer_connections =
             Arc::new(tokio::sync::Semaphore::new(options.max_peer_connections));
 
+        let (peer_to_torrent_tx, peer_to_torrent_rx) = tokio::sync::mpsc::channel(32);
+
         Ok(Self {
             peer_id,
             dot_torrent_bencode,
@@ -51,11 +53,19 @@ impl Torrent {
             info_hash,
             listener: None,
             max_peer_connections,
+            peer_to_torrent_tx,
+            peer_to_torrent_rx,
         })
     }
 
     pub(crate) async fn start(&mut self) -> Result<(), std::io::Error> {
-        let listener = listener::Listener::new(self.port, self.peer_id, self.info_hash)?;
+        let listener = listener::Listener::new(
+            self.port,
+            self.peer_id,
+            self.info_hash,
+            self.max_peer_connections.clone(),
+            self.peer_to_torrent_tx.clone(),
+        )?;
         self.listener = Some(listener);
         Ok(())
     }
@@ -145,6 +155,8 @@ impl Torrent {
         Ok(decoded)
     }
 }
+
+enum TorrentToPeer {}
 
 pub enum AnnounceEvent {
     Started,
