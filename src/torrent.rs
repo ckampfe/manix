@@ -1,7 +1,12 @@
 use sha1::Digest;
 
 use crate::{listener, peer, InfoHash, PeerId, Port};
-use std::{convert::TryInto, fmt::Display, sync::Arc};
+use std::{
+    convert::TryInto,
+    fmt::Display,
+    io::{Read, Write},
+    sync::Arc,
+};
 
 pub struct TorrentOptions {
     port: Port,
@@ -21,13 +26,15 @@ impl Default for TorrentOptions {
 
 pub struct Torrent {
     dot_torrent_bencode: nom_bencode::Bencode,
+    torrent_data: Box<dyn crate::ReadWrite>,
     port: Port,
     uploaded: usize,
     downloaded: usize,
     peer_id: PeerId,
     info_hash: InfoHash,
     listener: Option<listener::Listener>,
-    max_peer_connections: Arc<tokio::sync::Semaphore>,
+    global_max_peer_connections: Arc<tokio::sync::Semaphore>,
+    torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
     peer_to_torrent_tx: tokio::sync::mpsc::Sender<peer::PeerToTorrent>,
     peer_to_torrent_rx: tokio::sync::mpsc::Receiver<peer::PeerToTorrent>,
 }
@@ -36,10 +43,12 @@ impl Torrent {
     pub(crate) fn new(
         options: TorrentOptions,
         dot_torrent_bencode: nom_bencode::Bencode,
+        torrent_data: Box<dyn crate::ReadWrite>,
+        global_max_peer_connections: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self, std::io::Error> {
         let peer_id = generate_peer_id();
         let info_hash = info_hash(&dot_torrent_bencode);
-        let max_peer_connections =
+        let torrent_max_peer_connections =
             Arc::new(tokio::sync::Semaphore::new(options.max_peer_connections));
 
         let (peer_to_torrent_tx, peer_to_torrent_rx) = tokio::sync::mpsc::channel(32);
@@ -47,12 +56,14 @@ impl Torrent {
         Ok(Self {
             peer_id,
             dot_torrent_bencode,
+            torrent_data,
             port: options.port,
             uploaded: 0,
             downloaded: 0,
             info_hash,
             listener: None,
-            max_peer_connections,
+            global_max_peer_connections,
+            torrent_max_peer_connections,
             peer_to_torrent_tx,
             peer_to_torrent_rx,
         })
@@ -63,10 +74,12 @@ impl Torrent {
             self.port,
             self.peer_id,
             self.info_hash,
-            self.max_peer_connections.clone(),
+            self.global_max_peer_connections.clone(),
+            self.torrent_max_peer_connections.clone(),
             self.peer_to_torrent_tx.clone(),
         )?;
         self.listener = Some(listener);
+        self.announce(AnnounceEvent::Started).await?;
         Ok(())
     }
 
@@ -77,7 +90,7 @@ impl Torrent {
 
     pub fn get_info_hash_human(&self) -> String {
         let info_hash = self.get_info_hash_machine();
-        hex::encode(info_hash)
+        info_hash.human_readable()
     }
 
     pub fn get_info_hash_machine(&self) -> InfoHash {
@@ -102,7 +115,7 @@ impl Torrent {
     }
 
     pub fn get_ip(&self) -> &str {
-        todo!()
+        "localhost"
     }
 
     pub fn get_port(&self) -> Port {
@@ -120,16 +133,15 @@ impl Torrent {
     pub async fn announce(
         &self,
         event: AnnounceEvent,
-    ) -> Result<nom_bencode::Bencode, Box<dyn std::error::Error>> {
+    ) -> Result<nom_bencode::Bencode, std::io::Error> {
         let uploaded = self.get_uploaded().to_string();
         let downloaded = self.get_downloaded().to_string();
-        let info_hash = self.get_info_hash_human();
         let port = self.get_port().to_string();
         let peer_id = self.get_peer_id();
         let peer_id = std::str::from_utf8(peer_id.as_ref()).unwrap();
+        let info_hash = self.get_info_hash_machine();
 
         let mut params = vec![
-            ("info_hash", info_hash.as_str()),
             ("peer_id", peer_id),
             ("ip", self.get_ip()),
             ("port", &port),
@@ -143,14 +155,62 @@ impl Torrent {
             params.push(("event", &event_string));
         }
 
-        let url = reqwest::Url::parse_with_params(&self.get_announce_url(), params)?;
+        let url = reqwest::Url::parse_with_params(&self.get_announce_url(), params)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        let response = reqwest::get(url).await?;
-        let bytes = response.bytes().await?;
-        let bytes = bytes.to_vec();
-        let decoded = nom_bencode::decode(&bytes).map_err(|e| {
+        // NOTE:
+        // This is a hack to manually percent-encode the info_hash,
+        // as reqwest and its internal machinery require that URL params be &str's,
+        // and provide no way to pass raw bytes.
+        // So, we reify the URL to a string, and append the info_hash query param manually.
+        let mut url = url.to_string();
+        url.push_str("&info_hash=");
+        url.push_str(
+            &percent_encoding::percent_encode(
+                info_hash.as_ref(),
+                percent_encoding::NON_ALPHANUMERIC,
+            )
+            .to_string(),
+        );
+
+        // This provides some validation for the above hack, that we correctly made a valid URL
+        let url = reqwest::Url::parse(&url)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+
+        let response = reqwest::get(url)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let response_bytes = response
+            .bytes()
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+            .to_vec();
+
+        let decoded = nom_bencode::decode(&response_bytes).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{:?}", e))
         })?;
+
+        println!("RESPONSE: {}", &decoded.to_string());
+
+        match &decoded {
+            nom_bencode::Bencode::Dictionary(d) => {
+                for (k, v) in d {
+                    println!("{}", std::str::from_utf8(k).unwrap());
+                    // match v {
+                    //     nom_bencode::Bencode::String(s) => {
+                    //         println!(
+                    //             "{}: {:?}",
+                    //             std::str::from_utf8(&k).unwrap(),
+                    //             std::str::from_utf8(&s).unwrap()
+                    //         );
+                    //     }
+                    //     _ => panic!(),
+                    // }
+                }
+            }
+            _ => panic!(),
+        }
 
         Ok(decoded)
     }
