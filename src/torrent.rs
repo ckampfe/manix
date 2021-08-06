@@ -1,5 +1,7 @@
+use rand::Rng;
 use sha1::Digest;
 use tokio::time::Interval;
+use tracing::{debug, error, info, instrument};
 
 use crate::listener::{self, Listener};
 use crate::metainfo::MetaInfo;
@@ -9,12 +11,10 @@ use crate::{PeerId, Port};
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::Display;
-use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 
 pub struct TorrentOptions {
     port: Port,
-    torrent_channel_buffer_size: usize,
     max_peer_connections: usize,
 }
 
@@ -22,17 +22,17 @@ impl Default for TorrentOptions {
     fn default() -> Self {
         Self {
             port: 6881,
-            torrent_channel_buffer_size: 100,
             max_peer_connections: 25,
         }
     }
 }
 
+#[derive(Debug)]
 pub struct Torrent {
     peer_id: PeerId,
     meta_info: MetaInfo,
     torrent_data: Box<dyn crate::ReadWrite>,
-    peers: HashMap<PeerId, Peer>,
+    peers: HashMap<PeerId, tokio::sync::mpsc::Sender<TorrentToPeer>>,
     port: Port,
     uploaded: usize,
     downloaded: usize,
@@ -80,9 +80,9 @@ impl Torrent {
         })
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn start(&mut self) -> Result<(), std::io::Error> {
         let listener = listener::Listener::new(
-            // SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6881),
             "127.0.0.1:6881".to_string(),
             self.peer_id,
             self.info_hash,
@@ -98,56 +98,77 @@ impl Torrent {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn enter_event_loop(
-        &self,
+        &mut self,
         mut interrupt_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), std::io::Error> {
-        println!("el");
-        println!("in el");
-        let (announce_timer, debug_timer) = self.start_timers().await;
+        let Timers {
+            announce_timer,
+            debug_timer,
+        } = self.start_timers().await;
+
         tokio::pin!(announce_timer);
         tokio::pin!(debug_timer);
-
-        println!("after timer");
 
         loop {
             tokio::select! {
                 peer_result = self.listener.as_ref().unwrap().accept() => {
                     match peer_result {
                         Ok(peer) => {
-                            println!("ACCEPTED PEER: {:?}", peer);
+                            info!("ACCEPTED PEER");
                             tokio::spawn(async move {
                                 Peer::enter_event_loop(peer).await
                             });
                         },
                         Err(e) => {
-                            println!("{:?}", e);
+                            error!("{:?}", e);
                             panic!();
                         }
                     }
                 }
+                message = self.peer_to_torrent_rx.recv() => {
+                    match message {
+                        Some(message) => match message {
+                            peer::PeerToTorrent::Register { remote_peer_id, torrent_to_peer_tx } => {
+                                info!("registered remote peer {}", remote_peer_id);
+                                self.peers.insert(remote_peer_id, torrent_to_peer_tx);
+                            },
+                            peer::PeerToTorrent::Deregister {remote_peer_id } => {
+                                info!("deregistered remote peer {}", remote_peer_id);
+                                self.peers.remove(&remote_peer_id);
+                            }
+                        },
+                        None => debug!("peer_to_torrent_rx was closed when torrent.rs tried to receive a message from peer"),
+                    }
+                }
                 _ = announce_timer.tick() => {
-                    println!("ANNOUNCING");
+                    debug!("ANNOUNCING");
                     self.announce(AnnounceEvent::Empty).await?;
                 }
                 _ = debug_timer.tick() => {
                     let now = std::time::Instant::now();
-                    println!("DEBUG {:?}", now);
+                    debug!("DEBUG {:?}", now);
                 }
                 _ = (&mut interrupt_rx) => {
-                    println!("RECEIVED INTERRUPT");
+                    debug!("RECEIVED INTERRUPT");
                     return Ok(());
                 }
             }
         }
     }
 
-    async fn start_timers(&self) -> (Interval, Interval) {
+    async fn start_timers(&self) -> Timers {
         let announce_timer = tokio::time::interval(std::time::Duration::from_secs(60));
         let debug_timer = tokio::time::interval(std::time::Duration::from_secs(5));
-        (announce_timer, debug_timer)
+
+        Timers {
+            announce_timer,
+            debug_timer,
+        }
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn pause(&mut self) -> Result<(), std::io::Error> {
         // stop the event loop
         if let Some(tx) = self.event_loop_interrupt_tx.take() {
@@ -209,6 +230,7 @@ impl Torrent {
         &self.meta_info.info.pieces
     }
 
+    #[instrument(skip(self))]
     pub async fn announce(
         &self,
         event: AnnounceEvent,
@@ -272,33 +294,13 @@ impl Torrent {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{:?}", e))
         })?;
 
-        // println!("TRACKER RESPONSE: {:?}", &decoded.to_string());
-
-        match &decoded {
-            nom_bencode::Bencode::Dictionary(d) => {
-                for (k, v) in d {
-                    println!("{}", std::str::from_utf8(k).unwrap());
-                    // match v {
-                    //     nom_bencode::Bencode::String(s) => {
-                    //         println!(
-                    //             "{}: {:?}",
-                    //             std::str::from_utf8(&k).unwrap(),
-                    //             std::str::from_utf8(&s).unwrap()
-                    //         );
-                    //     }
-                    //     _ => panic!(),
-                    // }
-                }
-            }
-            _ => panic!(),
-        }
-
         Ok(decoded)
     }
 }
 
 pub(crate) enum TorrentToPeer {}
 
+#[derive(Clone, Copy, Debug)]
 pub enum AnnounceEvent {
     Started,
     Stopped,
@@ -317,9 +319,24 @@ impl Display for AnnounceEvent {
     }
 }
 
+struct Timers {
+    announce_timer: Interval,
+    debug_timer: Interval,
+}
+
 pub(crate) fn generate_peer_id() -> PeerId {
-    let id: [u8; 20] = *b"foooooooo00000000000";
-    PeerId(id)
+    let rand_string: String = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(16)
+        .map(char::from)
+        .collect();
+
+    let mut id = "MNX-".to_string();
+    id.push_str(&rand_string);
+
+    let id_bytes: [u8; 20] = id.as_bytes().try_into().unwrap();
+
+    PeerId(id_bytes)
 }
 
 fn info_hash(bencode: &nom_bencode::Bencode) -> InfoHash {

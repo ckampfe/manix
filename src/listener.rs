@@ -1,17 +1,16 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures_util::future::TryFutureExt;
 use tokio::net::{TcpListener, ToSocketAddrs};
-use tokio::task::JoinHandle;
 use tokio::try_join;
+use tracing::{debug, instrument};
 
 use crate::peer::{Peer, PeerToTorrent};
-use crate::{InfoHash, PeerId, Port};
+use crate::{InfoHash, PeerId};
 
 #[derive(Debug)]
 pub(crate) struct Listener<A: ToSocketAddrs> {
-    address: A, // handle: JoinHandle<Result<(), std::io::Error>>,
+    address: A,
     peer_id: PeerId,
     info_hash: InfoHash,
     global_max_peer_connections: Arc<tokio::sync::Semaphore>,
@@ -20,7 +19,7 @@ pub(crate) struct Listener<A: ToSocketAddrs> {
     listener: Option<TcpListener>,
 }
 
-impl<A: ToSocketAddrs + Clone> Listener<A> {
+impl<A: ToSocketAddrs + Clone + std::fmt::Debug> Listener<A> {
     pub(crate) fn new(
         address: A,
         peer_id: PeerId,
@@ -43,12 +42,14 @@ impl<A: ToSocketAddrs + Clone> Listener<A> {
         }
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn listen(&mut self) -> Result<(), std::io::Error> {
         let listener = TcpListener::bind(self.address.clone()).await?;
         self.listener = Some(listener);
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub(crate) async fn accept(&self) -> Result<Peer, std::io::Error> {
         let global_max_peer_connections = self.global_max_peer_connections.clone();
         let torrent_max_peer_connections = self.torrent_max_peer_connections.clone();
@@ -56,28 +57,28 @@ impl<A: ToSocketAddrs + Clone> Listener<A> {
 
         let available_global = global_max_peer_connections.available_permits();
         let available_torrent = torrent_max_peer_connections.available_permits();
-        println!("available global: {}", available_global);
-        println!("available per torrent: {}", available_torrent);
+        debug!("available global: {}", available_global);
+        debug!("available per torrent: {}", available_torrent);
 
-        println!("1");
+        debug!("1");
 
         let global_max_peers_permit_fut = global_max_peer_connections
             .acquire_owned()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()));
 
-        println!("2");
+        debug!("2");
 
         let torrent_max_peers_permit_fut = torrent_max_peer_connections
             .acquire_owned()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()));
 
-        println!("3");
+        debug!("3");
 
         let this_listener = self.listener.as_ref().unwrap();
 
         let addr = this_listener.local_addr().unwrap();
 
-        println!("{}", addr);
+        debug!("{}", addr);
 
         let (global_permit, torrent_permit, (socket, _socket_addr)) = try_join!(
             global_max_peers_permit_fut,
@@ -85,7 +86,7 @@ impl<A: ToSocketAddrs + Clone> Listener<A> {
             this_listener.accept()
         )?;
 
-        println!("4");
+        debug!("4");
 
         let peer = Peer::new(
             socket,
@@ -95,36 +96,7 @@ impl<A: ToSocketAddrs + Clone> Listener<A> {
             global_permit,
             torrent_permit,
         );
-        // let _peer_event_loop_task =
-        //     Peer::enter_event_loop(peer, global_permit, torrent_permit).await;
+
         Ok(peer)
     }
-
-    // pub(crate) async fn new(
-    //     port: Port,
-    //     peer_id: PeerId,
-    //     info_hash: InfoHash,
-    //     global_max_peer_connections: Arc<tokio::sync::Semaphore>,
-    //     torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
-    //     peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
-    // ) -> Result<(), std::io::Error> {
-    //     // TODO make this listening address configurable
-    //     // let handle = tokio::spawn(async move {
-    //     let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    //     // let listener = TcpListener::bind("localhost:6881").await?;
-    //     println!("{:?}", listener.local_addr());
-
-    //     loop {
-    //         // let global_permit = global_max_peers_permit_fut.await.unwrap();
-    //         // let torrent_permit = torrent_max_peers_permit_fut.await.unwrap();
-    //         // println!("4");
-    //         // let (socket, _socket_addr) = listener.accept().await?;
-
-    //         println!("4");
-    //     }
-    //     // });
-
-    //     // Ok(Self { port, handle })
-    //     // Ok(Self { port })
-    // }
 }

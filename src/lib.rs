@@ -1,6 +1,7 @@
 use async_client::AsyncClient;
 use blocking_client::BlockingClient;
 
+use std::fmt::Display;
 use std::io::{Read, Write};
 
 pub mod async_client;
@@ -24,9 +25,9 @@ pub fn blocking_client(options: Options) -> BlockingClient {
     BlockingClient::new(options)
 }
 
-pub trait ReadWrite: Read + Write + Send + Sync {}
+pub trait ReadWrite: Read + Write + std::fmt::Debug + Send + Sync {}
 
-impl<T: Read + Write + Send + Sync> ReadWrite for T {}
+impl<T: Read + Write + std::fmt::Debug + Send + Sync> ReadWrite for T {}
 
 pub struct Options {
     global_max_peer_connections: usize,
@@ -40,12 +41,18 @@ impl Default for Options {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct PeerId([u8; 20]);
 
 impl PeerId {
     pub fn human_readable(&self) -> String {
-        std::str::from_utf8(&self.0).unwrap().to_string()
+        self.to_string()
+    }
+}
+
+impl Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "{}", std::str::from_utf8(&self.0).unwrap().to_string())
     }
 }
 

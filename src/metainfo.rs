@@ -1,10 +1,12 @@
 use std::convert::{TryFrom, TryInto};
 
+#[derive(Clone, Debug)]
 pub(crate) struct MetaInfo {
     pub announce: String,
     pub info: Info,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct Info {
     pub name: String,
     pub piece_length: usize,
@@ -48,10 +50,6 @@ impl TryFrom<nom_bencode::Bencode> for MetaInfo {
                         let pieces_key = b"pieces".to_vec();
                         let length_key = b"length".to_vec();
                         // let path_key = b"path".to_vec();
-
-                        // for key in info.keys() {
-                        //     println!("{}", std::str::from_utf8(key).unwrap());
-                        // }
 
                         let name = info.get(&name_key).unwrap().unwrap_string();
                         let piece_length =
