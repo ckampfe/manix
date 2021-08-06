@@ -33,7 +33,15 @@ impl BlockingClient {
         self.rt.block_on(self.inner.start_torrent(info_hash))
     }
 
+    pub fn pause_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
+        self.rt.block_on(self.inner.pause_torrent(info_hash))
+    }
+
     pub fn list_torrents(&self) -> Vec<&Torrent> {
         self.rt.block_on(self.inner.list_torrents())
     }
+
+    // pub fn get_torrents_hash(&self) -> [u8; 20] {
+    //     self.rt.block_on(self.inner.get_torrents_hash())
+    // }
 }

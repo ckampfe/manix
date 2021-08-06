@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 pub mod async_client;
 pub mod blocking_client;
 mod listener;
+mod metainfo;
 mod peer;
 mod peer_protocol;
 pub mod torrent;
@@ -65,7 +66,7 @@ pub struct InfoHash([u8; 20]);
 
 impl InfoHash {
     pub fn human_readable(&self) -> String {
-        hex::encode_upper(self.as_ref())
+        hex::encode(self.as_ref())
     }
 }
 

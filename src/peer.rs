@@ -1,7 +1,6 @@
 use std::convert::TryFrom;
 
 use bitvec::{order::Lsb0, prelude::BitVec};
-use futures_util::try_join;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -9,18 +8,20 @@ use tokio::{
 
 use crate::{
     peer_protocol::{self, HANDSHAKE_LENGTH},
-    Begin, Index, InfoHash, Length, PeerId,
+    torrent, Begin, Index, InfoHash, Length, PeerId,
 };
 
+#[derive(Debug)]
 pub(crate) struct Peer {
     socket: tokio::net::TcpStream,
     peer_id: PeerId,
     remote_peer_id: Option<PeerId>,
     info_hash: InfoHash,
     peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
+    torrent_to_peer_rx: Option<tokio::sync::mpsc::Receiver<torrent::TorrentToPeer>>,
     handshake_status: HandshakeState,
-    global_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    torrent_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    global_permit: tokio::sync::OwnedSemaphorePermit,
+    torrent_permit: tokio::sync::OwnedSemaphorePermit,
     choke_state: ChokeState,
     interest_state: InterestState,
 }
@@ -31,6 +32,8 @@ impl Peer {
         peer_id: PeerId,
         info_hash: InfoHash,
         peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
+        global_permit: tokio::sync::OwnedSemaphorePermit,
+        torrent_permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Self {
         Self {
             socket,
@@ -38,45 +41,40 @@ impl Peer {
             remote_peer_id: None,
             info_hash,
             peer_to_torrent_tx,
+            torrent_to_peer_rx: None,
             handshake_status: HandshakeState::PreHandshake,
-            global_permit: None,
-            torrent_permit: None,
+            global_permit,
+            torrent_permit,
             choke_state: ChokeState::Choked,
             interest_state: InterestState::NotInterested,
         }
     }
 
-    pub(crate) async fn enter_event_loop(
-        mut peer: Peer,
-        global_permit: tokio::sync::OwnedSemaphorePermit,
-        torrent_permit: tokio::sync::OwnedSemaphorePermit,
-    ) -> tokio::task::JoinHandle<Result<(), std::io::Error>> {
-        peer.global_permit = Some(global_permit);
-        peer.torrent_permit = Some(torrent_permit);
-        tokio::spawn(async move {
-            loop {
-                match peer.handshake_status {
-                    HandshakeState::PreHandshake => {
-                        println!(
-                            "prehandshake {}",
-                            peer.get_remote_peer_id_human_readable().unwrap()
-                        );
-                        peer.pre_handshake().await?;
-                        println!(
-                            "prehandshake {} complete",
-                            peer.get_remote_peer_id_human_readable().unwrap()
-                        );
-                        println!(
-                            "this is where the peer would register with the controlling torrent"
-                        );
-                    }
-                    HandshakeState::PostHandshake => peer.post_handhsake().await?,
+    pub(crate) async fn enter_event_loop(mut peer: Peer) -> Result<(), std::io::Error> {
+        loop {
+            match peer.handshake_status {
+                HandshakeState::PreHandshake => {
+                    println!(
+                        "prehandshake {}",
+                        peer.get_remote_peer_id_human_readable().unwrap()
+                    );
+                    let remote_peer_id = peer.handshake_remote_peer().await?;
+                    peer.remote_peer_id = Some(remote_peer_id);
+                    peer.register_with_owning_torrent().await.map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+                    })?;
+                    peer.handshake_status = HandshakeState::PostHandshake;
+                    println!(
+                        "handshake {} complete",
+                        peer.get_remote_peer_id_human_readable().unwrap()
+                    );
                 }
+                HandshakeState::PostHandshake => peer.post_handshake().await?,
             }
-        })
+        }
     }
 
-    async fn pre_handshake(&mut self) -> Result<(), std::io::Error> {
+    async fn handshake_remote_peer(&mut self) -> Result<PeerId, std::io::Error> {
         self.send_handshake().await?;
 
         let handshake = self.receive_handshake().await?;
@@ -90,13 +88,11 @@ impl Peer {
         // if not, sever the connection and drop the semaphore permit
         {
             if self.info_hash == remote_info_hash {
-                self.handshake_status = HandshakeState::PostHandshake;
-                self.remote_peer_id = Some(remote_peer_id);
-                Ok(())
+                Ok(remote_peer_id)
             } else {
                 // drop(permit);
-                self.global_permit = None; // this will get dropped when self is dropped
-                self.torrent_permit = None; // this will get dropped when self is dropped
+                // self.global_permit = None; // this will get dropped when self is dropped
+                // self.torrent_permit = None; // this will get dropped when self is dropped
 
                 Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -107,8 +103,8 @@ impl Peer {
             // so drop the permit and the connection
         } else {
             // drop(permit);
-            self.global_permit = None; // this will get dropped when self is dropped
-            self.torrent_permit = None; // this will get dropped when self is dropped
+            // self.global_permit = None; // this will get dropped when self is dropped
+            // self.torrent_permit = None; // this will get dropped when self is dropped
 
             Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -117,14 +113,26 @@ impl Peer {
         }
     }
 
-    async fn post_handhsake(&mut self) -> Result<(), std::io::Error> {
-        todo!("we made it out of the handshake state")
+    async fn post_handshake(&mut self) -> Result<(), std::io::Error> {
+        todo!("made it out of the handshake state")
     }
 
     // pub(crate) async fn connect<A: ToSocketAddrs>(addr: A) -> Result<Peer, std::io::Error> {
     //     let socket = TcpStream::connect(addr).await?;
     //     Ok(Self { socket })
     // }
+    async fn register_with_owning_torrent(
+        &mut self,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<PeerToTorrent>> {
+        let (torrent_to_peer_tx, torrent_to_peer_rx) = tokio::sync::mpsc::channel(32);
+        self.torrent_to_peer_rx = Some(torrent_to_peer_rx);
+        self.peer_to_torrent_tx
+            .send(PeerToTorrent::Register {
+                peer_id: self.peer_id,
+                torrent_to_peer_tx,
+            })
+            .await
+    }
 
     fn get_info_hash(&self) -> InfoHash {
         self.info_hash
@@ -263,18 +271,26 @@ impl Peer {
     }
 }
 
-pub(crate) enum PeerToTorrent {}
+pub(crate) enum PeerToTorrent {
+    Register {
+        peer_id: PeerId,
+        torrent_to_peer_tx: tokio::sync::mpsc::Sender<torrent::TorrentToPeer>,
+    },
+}
 
+#[derive(Debug)]
 enum HandshakeState {
     PreHandshake,
     PostHandshake,
 }
 
+#[derive(Debug)]
 enum ChokeState {
     Choked,
     NotChoked,
 }
 
+#[derive(Debug)]
 enum InterestState {
     Interested,
     NotInterested,

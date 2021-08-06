@@ -9,7 +9,8 @@ edition = "2018"
 bitvec = "0.22"
 futures-util = "0.3"
 hex = "0.4"
-nom_bencode = { git = "https://github.com/ckampfe/nom_bencode", branch = "display" }
+# nom_bencode = { git = "https://github.com/ckampfe/nom_bencode", branch = "display" }
+nom_bencode = { path = "/Users/clark/code/nom_bencode" }
 percent-encoding = "2.1"
 reqwest = "0.11"
 sha-1 = "0.9"

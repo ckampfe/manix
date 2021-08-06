@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, io::Read, sync::Arc};
 
+use sha1::Digest;
+
 use crate::{
     torrent::{self, Torrent},
     Options, ReadWrite,
@@ -19,6 +21,16 @@ impl AsyncClient {
             )),
         }
     }
+
+    // pub async fn add_torrent<R: Read>(
+    //     &mut self,
+    //     dot_torrent_read: R,
+    //     torrent_data: Box<dyn ReadWrite>,
+    // ) -> Result<&Torrent, std::io::Error> {
+    //     let t = self.add_torrent_impl(dot_torrent_read, torrent_data)?;
+    //     self.update_torrents_hash().await;
+    //     self.get_torrent(&t)
+    // }
 
     pub async fn add_torrent<R: Read>(
         &mut self,
@@ -49,11 +61,17 @@ impl AsyncClient {
             self.global_max_peer_connections.clone(),
         )?;
         // has it already been loaded?
+
+        // let human_hash = torrent.get_info_hash_human();
+
         if let std::collections::btree_map::Entry::Vacant(e) =
             self.torrents.entry(torrent.get_info_hash_human())
         {
             // if not, add it and return a reference to its Torrent
+            // let t = e.insert(torrent);
+            // r.update_torrents_hash();
             Ok(e.insert(torrent))
+            // Ok(human_hash)
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -86,6 +104,40 @@ impl AsyncClient {
     pub async fn list_torrents(&self) -> Vec<&Torrent> {
         self.torrents.values().collect()
     }
+
+    // async fn update_torrents_hash(&mut self) {
+    //     let hash = self.hash();
+    //     self.torrents_hash = hash;
+    // }
+
+    // pub async fn get_torrents_hash(&self) -> [u8; 20] {
+    //     self.torrents_hash
+    // }
+
+    // fn hash(&self) -> [u8; 20] {
+    //     let mut hasher = sha1::Sha1::new();
+
+    //     for key in self.torrents.keys() {
+    //         hasher.update(key);
+    //     }
+
+    //     // acquire hash digest in the form of GenericArray,
+    //     // which in this case is equivalent to [u8; 20]
+    //     let result = hasher.finalize();
+    //     result.into()
+    // }
+
+    // fn get_torrent(&mut self, info_hash: &str) -> Result<&Torrent, std::io::Error> {
+    //     let torrent = self.torrents.get(info_hash);
+    //     if let Some(torrent) = torrent {
+    //         Ok(torrent)
+    //     } else {
+    //         Err(std::io::Error::new(
+    //             std::io::ErrorKind::NotFound,
+    //             format!("Could not find torrent for info hash {}", info_hash),
+    //         ))
+    //     }
+    // }
 
     fn get_torrent_mut(&mut self, info_hash: &str) -> Result<&mut Torrent, std::io::Error> {
         let torrent = self.torrents.get_mut(info_hash);
