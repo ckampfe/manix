@@ -46,7 +46,13 @@ impl PeerId {
 
 impl Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "{}", std::str::from_utf8(&self.0).unwrap().to_string())
+        write!(
+            f,
+            "{}",
+            std::str::from_utf8(&self.0)
+                .expect("peer ids must be valid UTF-8")
+                .to_string()
+        )
     }
 }
 
