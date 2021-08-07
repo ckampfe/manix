@@ -1,8 +1,6 @@
 use async_client::AsyncClient;
 use blocking_client::BlockingClient;
-
 use std::fmt::Display;
-use std::io::{Read, Write};
 
 pub mod async_client;
 pub mod blocking_client;
@@ -24,10 +22,6 @@ pub fn async_client(options: Options) -> AsyncClient {
 pub fn blocking_client(options: Options) -> BlockingClient {
     BlockingClient::new(options)
 }
-
-pub trait ReadWrite: Read + Write + std::fmt::Debug + Send + Sync {}
-
-impl<T: Read + Write + std::fmt::Debug + Send + Sync> ReadWrite for T {}
 
 pub struct Options {
     global_max_peer_connections: usize,

@@ -1,13 +1,11 @@
-use std::convert::TryFrom;
-
+use crate::peer_protocol::{self, HANDSHAKE_LENGTH};
+use crate::{torrent, Begin, Index, InfoHash, Length, PeerId};
 use bitvec::{order::Lsb0, prelude::BitVec};
+use std::convert::TryFrom;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::{instrument, trace};
-
-use crate::peer_protocol::{self, HANDSHAKE_LENGTH};
-use crate::{torrent, Begin, Index, InfoHash, Length, PeerId};
 
 #[derive(Debug)]
 pub(crate) struct Peer {
@@ -48,24 +46,25 @@ impl Peer {
     }
 
     #[instrument]
-    pub(crate) async fn enter_event_loop(mut peer: Peer) -> Result<(), std::io::Error> {
-        let remote_peer_id = peer.handshake_remote_peer().await?;
-        peer.remote_peer_id = Some(remote_peer_id);
+    pub(crate) async fn enter_event_loop(mut self) -> Result<(), std::io::Error> {
+        let remote_peer_id = self.handshake_remote_peer().await?;
+        self.remote_peer_id = Some(remote_peer_id);
 
-        peer.register_with_owning_torrent().await?;
+        self.register_with_owning_torrent().await?;
 
-        let Timers { keepalive } = peer.start_timers().await;
-
-        tokio::pin!(keepalive);
+        let Timers { mut keepalive } = self.start_timers().await;
 
         loop {
+            // take ownership of the TorrentToPeer rx channel for the duration of the loop
+            let mut rx = self.torrent_to_peer_rx.take().unwrap();
+
             tokio::select! {
-                result = peer.receive_message() => {
+                result = self.receive_message() => {
                     match result {
                         Ok(message) => {
                             match message {
                                 peer_protocol::Message::Keepalive => (),
-                                peer_protocol::Message::Choke => peer.send_choke().await?,
+                                peer_protocol::Message::Choke => self.send_choke().await?,
                                 peer_protocol::Message::Unchoke => todo!(),
                                 peer_protocol::Message::Interested => todo!(),
                                 peer_protocol::Message::NotInterested => todo!(),
@@ -78,16 +77,41 @@ impl Peer {
                             }
                         }
                         Err(e) => {
-                            // error!("got {:?}", e);
-                            peer.deregister_with_owned_torrent().await?;
+                            self.deregister_with_owning_torrent().await?;
                             return Err(e);
                         }
                     }
                 }
+                result = Peer::receive_message_from_owning_torrent(&mut rx) => {
+                    match result {
+                        Some(message) => match message {
+                            torrent::TorrentToPeer::Choke => {
+                                self.choke_state = ChokeState::Choked;
+                                self.send_choke().await?
+                            },
+                            torrent::TorrentToPeer::NotChoked => {
+                                self.choke_state = ChokeState::NotChoked;
+                                self.send_unchoke().await?
+                            },
+                            torrent::TorrentToPeer::Interested => {
+                                self.interest_state = InterestState::Interested;
+                                self.send_interested().await?
+                            },
+                            torrent::TorrentToPeer::NotInterested => {
+                                self.interest_state = InterestState::NotInterested;
+                                self.send_not_interested().await?
+                            },
+                        },
+                        None => todo!(),
+                    }
+                }
                 _ = keepalive.tick() => {
-                    peer.send_keepalive().await?;
+                    self.send_keepalive().await?;
                 }
             }
+
+            // return ownership of the TorrentToPeer rx channel to Self
+            self.torrent_to_peer_rx = Some(rx);
         }
     }
 
@@ -134,34 +158,6 @@ impl Peer {
                 "received a non-handshake message when was expecting handshake",
             ))
         }
-    }
-
-    #[instrument(skip(self))]
-    async fn register_with_owning_torrent(&mut self) -> Result<(), std::io::Error> {
-        let (torrent_to_peer_tx, torrent_to_peer_rx) = tokio::sync::mpsc::channel(32);
-        self.torrent_to_peer_rx = Some(torrent_to_peer_rx);
-        self.send_to_owned_torrent(PeerToTorrent::Register {
-            remote_peer_id: self
-                .remote_peer_id
-                .expect("remote peer id must be known and set here"),
-            torrent_to_peer_tx,
-        })
-        .await
-    }
-
-    #[instrument(skip(self))]
-    async fn deregister_with_owned_torrent(&mut self) -> Result<(), std::io::Error> {
-        self.send_to_owned_torrent(PeerToTorrent::Deregister {
-            remote_peer_id: self.remote_peer_id.unwrap(),
-        })
-        .await
-    }
-
-    async fn send_to_owned_torrent(&self, message: PeerToTorrent) -> Result<(), std::io::Error> {
-        self.peer_to_torrent_tx
-            .send(message)
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
     }
 
     fn get_info_hash(&self) -> InfoHash {
@@ -297,7 +293,6 @@ impl Peer {
         // handshake buf has to be fully filled with bytes, not just allocated capacity with `Vec::with_capacity`.
         let mut buf = vec![0u8; HANDSHAKE_LENGTH];
         self.socket.read_exact(&mut buf).await?;
-        dbg!(buf.len());
 
         peer_protocol::Message::try_from(buf)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -308,12 +303,51 @@ impl Peer {
         self.socket.read_exact(&mut length_bytes).await?;
         Ok(u32::from_be_bytes(length_bytes))
     }
+
+    #[instrument(skip(self))]
+    async fn register_with_owning_torrent(&mut self) -> Result<(), std::io::Error> {
+        let (torrent_to_peer_tx, torrent_to_peer_rx) = tokio::sync::mpsc::channel(32);
+        self.torrent_to_peer_rx = Some(torrent_to_peer_rx);
+        self.send_to_owned_torrent(PeerToTorrent::Register {
+            remote_peer_id: self
+                .remote_peer_id
+                .expect("remote peer id must be known and set here"),
+            torrent_to_peer_tx,
+        })
+        .await
+    }
+
+    #[instrument(skip(self))]
+    async fn deregister_with_owning_torrent(&mut self) -> Result<(), std::io::Error> {
+        self.send_to_owned_torrent(PeerToTorrent::Deregister {
+            remote_peer_id: self.remote_peer_id.unwrap(),
+        })
+        .await
+    }
+
+    #[instrument(skip(self))]
+    async fn send_to_owned_torrent(&self, message: PeerToTorrent) -> Result<(), std::io::Error> {
+        self.peer_to_torrent_tx
+            .send(message)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
+    }
+
+    #[instrument]
+    // this exists as a free function because it allows us to do a partial borrow of the Self struct's contents,
+    // rather than mutable borrowing the entire Self, which can only be done once in a scope
+    async fn receive_message_from_owning_torrent(
+        rx: &mut tokio::sync::mpsc::Receiver<torrent::TorrentToPeer>,
+    ) -> Option<torrent::TorrentToPeer> {
+        rx.recv().await
+    }
 }
 
 struct Timers {
     keepalive: Interval,
 }
 
+#[derive(Debug)]
 pub(crate) enum PeerToTorrent {
     Register {
         remote_peer_id: PeerId,

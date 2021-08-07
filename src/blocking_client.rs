@@ -1,6 +1,8 @@
+use crate::async_client::AsyncClient;
+use crate::torrent::Torrent;
+use crate::Options;
 use std::io::Read;
-
-use crate::{async_client::AsyncClient, torrent::Torrent, Options, ReadWrite};
+use std::path::PathBuf;
 
 pub struct BlockingClient {
     inner: AsyncClient,
@@ -23,7 +25,7 @@ impl BlockingClient {
     pub fn add_torrent<R: Read>(
         &mut self,
         dot_torrent_read: R,
-        torrent_data: Box<dyn ReadWrite>,
+        torrent_data: PathBuf,
     ) -> Result<&Torrent, std::io::Error> {
         self.rt
             .block_on(self.inner.add_torrent(dot_torrent_read, torrent_data))

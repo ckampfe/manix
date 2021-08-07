@@ -1,9 +1,10 @@
-use std::{collections::HashMap, io::Read, sync::Arc};
-
-use crate::{
-    torrent::{self, Torrent},
-    Options, ReadWrite,
-};
+use crate::torrent;
+use crate::torrent::Torrent;
+use crate::Options;
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 pub struct AsyncClient {
     torrents: HashMap<String, Torrent>,
@@ -23,7 +24,7 @@ impl AsyncClient {
     pub async fn add_torrent<R: Read>(
         &mut self,
         mut dot_torrent_read: R,
-        torrent_data: Box<dyn ReadWrite>,
+        torrent_data: PathBuf,
     ) -> Result<&Torrent, std::io::Error> {
         // read the .torrent
         let mut buf = vec![];
