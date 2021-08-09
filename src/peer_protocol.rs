@@ -1,7 +1,9 @@
-use std::convert::{TryFrom, TryInto};
-
 use crate::{Begin, Index, InfoHash, Length, PeerId};
-use bitvec::prelude::BitVec;
+use bitvec::order::Msb0;
+use bitvec::prelude::{bitvec, BitVec};
+use std::convert::{TryFrom, TryInto};
+use std::ops::BitOrAssign;
+use std::ops::{Deref, DerefMut};
 
 const HANDSHAKE_LENGTH_LENGTH: usize = 1;
 const BITTORRENT_PROTOCOL: &[u8] = b"BitTorrent protocol";
@@ -40,9 +42,7 @@ pub(crate) enum Message {
     /// 4
     Have { index: Index },
     /// 5
-    Bitfield {
-        bitfield: BitVec<bitvec::order::Lsb0, u8>,
-    },
+    Bitfield { bitfield: Bitfield },
     /// 6
     Request {
         index: Index,
@@ -182,8 +182,10 @@ impl TryFrom<Vec<u8>> for Message {
                 index: decode_number([*a, *b, *c, *d]),
             }),
             [BITFIELD, bitfield @ ..] => Ok(Message::Bitfield {
-                bitfield: BitVec::<bitvec::order::Lsb0, u8>::from_slice(bitfield)
-                    .map_err(|e| e.to_string())?,
+                bitfield: Bitfield(
+                    BitVec::<bitvec::order::Msb0, u8>::from_slice(bitfield)
+                        .map_err(|e| e.to_string())?,
+                ),
             }),
             [REQUEST, a, b, c, d, e, f, g, h, i, j, k, l] => {
                 let index = decode_number([*a, *b, *c, *d]);
@@ -240,6 +242,35 @@ impl TryFrom<Vec<u8>> for Message {
             }
             _ => Err("Could not decode bencoded peer message".to_string()),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Bitfield(BitVec<Msb0, u8>);
+
+impl Bitfield {
+    pub(crate) fn new(length: usize) -> Self {
+        Self(bitvec![Msb0, u8; 0; length])
+    }
+}
+
+impl BitOrAssign for Bitfield {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0.bitor_assign(rhs.0);
+    }
+}
+
+impl Deref for Bitfield {
+    type Target = BitVec<Msb0, u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Bitfield {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -316,7 +347,7 @@ mod tests {
 
     #[test]
     fn encode_bitfield() {
-        let bitfield: BitVec<Lsb0, u8> = bitvec![Lsb0, u8; 0, 0, 0, 1, 0, 1, 0, 0];
+        let bitfield = Bitfield(bitvec![Msb0, u8; 0, 0, 0, 1, 0, 1, 0, 0]);
         let bitfield_as_bytes = bitfield.as_raw_slice().to_vec();
 
         let m = Message::Bitfield { bitfield };
@@ -496,7 +527,7 @@ mod tests {
 
     #[test]
     fn decode_bitfield() {
-        let bitfield: BitVec<Lsb0, u8> = bitvec![Lsb0, u8; 0, 0, 0, 1, 0, 1, 0, 0];
+        let bitfield = Bitfield(bitvec![Msb0, u8; 0, 0, 1, 0, 1, 0, 0, 0]);
         let m = vec![BITFIELD, 40];
         assert_eq!(
             Message::try_from(m).unwrap(),

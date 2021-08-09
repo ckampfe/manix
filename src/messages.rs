@@ -1,3 +1,4 @@
+use crate::peer_protocol;
 use crate::PeerId;
 
 pub(crate) enum TorrentToPeer {
@@ -15,5 +16,13 @@ pub(crate) enum PeerToTorrent {
     },
     Deregister {
         remote_peer_id: PeerId,
+    },
+    RequestBitfield {
+        remote_peer_id: PeerId,
+        responder: tokio::sync::oneshot::Sender<peer_protocol::Bitfield>,
+    },
+    Bitfield {
+        remote_peer_id: PeerId,
+        bitfield: peer_protocol::Bitfield,
     },
 }

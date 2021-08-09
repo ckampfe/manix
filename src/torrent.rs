@@ -1,10 +1,8 @@
 use crate::listener::{self, Listener};
-use crate::messages;
 use crate::metainfo::MetaInfo;
 use crate::InfoHash;
+use crate::{messages, peer_protocol};
 use crate::{PeerId, Port};
-use bitvec::order::Lsb0;
-use bitvec::prelude::{bitvec, BitVec};
 use rand::Rng;
 use sha1::Digest;
 use std::collections::HashMap;
@@ -39,7 +37,7 @@ pub struct Torrent {
     port: Port,
     uploaded: usize,
     downloaded: usize,
-    pieces_bitfield: BitVec<Lsb0, u8>,
+    pieces_bitfield: peer_protocol::Bitfield,
     info_hash: InfoHash,
     listener: Option<Listener<String>>,
     global_max_peer_connections: Arc<tokio::sync::Semaphore>,
@@ -62,7 +60,7 @@ impl Torrent {
         let meta_info = MetaInfo::try_from(dot_torrent_bencode)?;
         info!("metainfo reports {} pieces", meta_info.info.pieces.len());
         info!("metainfo reports length of {}", meta_info.info.piece_length);
-        let pieces_bitfield = bitvec![Lsb0, u8; 0; meta_info.info.pieces.len()];
+        let pieces_bitfield = peer_protocol::Bitfield::new(meta_info.info.pieces.len());
         let torrent_max_peer_connections =
             Arc::new(tokio::sync::Semaphore::new(options.max_peer_connections));
 
@@ -121,6 +119,8 @@ impl Torrent {
 
         // drop the listener as well
         let _ = self.listener.take();
+
+        self.announce(AnnounceEvent::Stopped).await?;
 
         Ok(())
     }
@@ -348,9 +348,18 @@ impl Torrent {
                                 info!("registered remote peer {}", remote_peer_id);
                                 self.peers.insert(remote_peer_id, torrent_to_peer_tx);
                             },
-                            messages::PeerToTorrent::Deregister {remote_peer_id } => {
+                            messages::PeerToTorrent::Deregister { remote_peer_id } => {
                                 info!("deregistered remote peer {}", remote_peer_id);
                                 self.peers.remove(&remote_peer_id);
+                            },
+                            messages::PeerToTorrent::RequestBitfield { remote_peer_id: _, responder } => {
+                                responder.send(
+                                        self.pieces_bitfield.clone()
+                                ).map_err(|_e| std::io::Error::new(std::io::ErrorKind::Other, "TODO actually handle this torrent to peer send error"))?;
+                            }
+                            messages::PeerToTorrent::Bitfield { remote_peer_id, bitfield } => {
+                                info!("received bitfield from {}", remote_peer_id);
+                                self.pieces_bitfield |= bitfield
                             }
                         },
                         None => error!("peer_to_torrent_rx was closed when torrent.rs tried to receive a message from peer"),

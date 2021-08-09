@@ -1,11 +1,10 @@
 use crate::peer_protocol::{self, HANDSHAKE_LENGTH};
 use crate::{messages, Begin, Index, InfoHash, Length, PeerId};
-use bitvec::{order::Lsb0, prelude::BitVec};
 use std::convert::TryFrom;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Interval, MissedTickBehavior};
-use tracing::{instrument, trace};
+use tracing::{error, info, instrument, trace};
 
 #[derive(Debug)]
 pub(crate) struct Peer {
@@ -45,14 +44,31 @@ impl Peer {
         }
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub(crate) async fn enter_event_loop(mut self) -> Result<(), std::io::Error> {
         let remote_peer_id = self.handshake_remote_peer().await?;
         self.remote_peer_id = Some(remote_peer_id);
 
+        info!(
+            "registering {:?} with owning torrent",
+            self.remote_peer_id.as_ref().map(|pid| pid.to_string())
+        );
         self.register_with_owning_torrent().await?;
 
+        let current_bitfield = self.request_current_bifield().await?.await.map_err(|_e| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "TODO handle this oneshot channel error",
+            )
+        })?;
+        info!("got bitfield from owning torrent");
+
+        self.send_bitfield(current_bitfield).await?;
+        info!("Sent bitfield to peer");
+
         let Timers { mut keepalive } = self.start_timers().await;
+
+        info!("Started peer timers");
 
         loop {
             // take ownership of the TorrentToPeer rx channel for the duration of the loop
@@ -63,20 +79,38 @@ impl Peer {
                     match result {
                         Ok(message) => {
                             match message {
-                                peer_protocol::Message::Keepalive => (),
-                                peer_protocol::Message::Choke => self.send_choke().await?,
-                                peer_protocol::Message::Unchoke => todo!(),
-                                peer_protocol::Message::Interested => todo!(),
-                                peer_protocol::Message::NotInterested => todo!(),
+                                peer_protocol::Message::Keepalive => {
+                                    info!("Receieved keepalive")
+                                },
+                                peer_protocol::Message::Choke => {
+                                    info!("Received choke");
+                                    self.send_choke().await?
+                                },
+                                peer_protocol::Message::Unchoke => {
+                                    info!("Received unchoke");
+                                },
+                                peer_protocol::Message::Interested => {
+                                    info!("Received interested");
+                                },
+                                peer_protocol::Message::NotInterested => {
+                                    info!("Received not interested");
+                                },
                                 peer_protocol::Message::Have { index: _ } => todo!(),
-                                peer_protocol::Message::Bitfield { bitfield: _ } => todo!(),
+                                peer_protocol::Message::Bitfield { bitfield } => {
+                                    info!("Received bitfield");
+                                    self.report_bitfield(bitfield).await?;
+                                },
                                 peer_protocol::Message::Request { index: _, begin: _, length: _ } => todo!(),
                                 peer_protocol::Message::Piece { index: _, begin: _, chunk: _ } => todo!(),
                                 peer_protocol::Message::Cancel { index: _, begin: _, length: _ } => todo!(),
-                                peer_protocol::Message::Handshake { protocol_extension_bytes: _, peer_id: _, info_hash: _ } => todo!(),
+                                peer_protocol::Message::Handshake { protocol_extension_bytes: _, peer_id: _, info_hash: _ } => {
+                                    error!("shouldn't receive this handshake, but we did!");
+                                    todo!("shouldn't receieve this handshake, but we did!")
+                                },
                             }
                         }
                         Err(e) => {
+                            error!("{:#?}", e.to_string());
                             self.deregister_with_owning_torrent().await?;
                             return Err(e);
                         }
@@ -106,6 +140,7 @@ impl Peer {
                     }
                 }
                 _ = keepalive.tick() => {
+                    info!("sent keepalive");
                     self.send_keepalive().await?;
                 }
             }
@@ -218,7 +253,10 @@ impl Peer {
     }
 
     #[instrument(skip(self))]
-    async fn send_bitfield(&mut self, bitfield: BitVec<Lsb0, u8>) -> Result<(), std::io::Error> {
+    async fn send_bitfield(
+        &mut self,
+        bitfield: peer_protocol::Bitfield,
+    ) -> Result<(), std::io::Error> {
         self.send_message(peer_protocol::Message::Bitfield { bitfield })
             .await
     }
@@ -323,6 +361,32 @@ impl Peer {
             remote_peer_id: self.remote_peer_id.unwrap(),
         })
         .await
+    }
+
+    #[instrument(skip(self))]
+    async fn request_current_bifield(
+        &self,
+    ) -> Result<tokio::sync::oneshot::Receiver<peer_protocol::Bitfield>, std::io::Error> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.send_to_owned_torrent(messages::PeerToTorrent::RequestBitfield {
+            remote_peer_id: self.remote_peer_id.unwrap(),
+            responder: tx,
+        })
+        .await?;
+        Ok(rx)
+    }
+
+    #[instrument(skip(self))]
+    async fn report_bitfield(
+        &self,
+        bitfield: peer_protocol::Bitfield,
+    ) -> Result<(), std::io::Error> {
+        self.send_to_owned_torrent(messages::PeerToTorrent::Bitfield {
+            remote_peer_id: self.remote_peer_id.unwrap(),
+            bitfield,
+        })
+        .await?;
+        Ok(())
     }
 
     #[instrument(skip(self))]
