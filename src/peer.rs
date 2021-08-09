@@ -1,5 +1,5 @@
 use crate::peer_protocol::{self, HANDSHAKE_LENGTH};
-use crate::{torrent, Begin, Index, InfoHash, Length, PeerId};
+use crate::{messages, Begin, Index, InfoHash, Length, PeerId};
 use bitvec::{order::Lsb0, prelude::BitVec};
 use std::convert::TryFrom;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,8 +13,8 @@ pub(crate) struct Peer {
     peer_id: PeerId,
     remote_peer_id: Option<PeerId>,
     info_hash: InfoHash,
-    peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
-    torrent_to_peer_rx: Option<tokio::sync::mpsc::Receiver<torrent::TorrentToPeer>>,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
+    torrent_to_peer_rx: Option<tokio::sync::mpsc::Receiver<messages::TorrentToPeer>>,
     global_permit: tokio::sync::OwnedSemaphorePermit,
     torrent_permit: tokio::sync::OwnedSemaphorePermit,
     choke_state: ChokeState,
@@ -27,7 +27,7 @@ impl Peer {
         socket: TcpStream,
         peer_id: PeerId,
         info_hash: InfoHash,
-        peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
+        peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
         global_permit: tokio::sync::OwnedSemaphorePermit,
         torrent_permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Self {
@@ -85,19 +85,19 @@ impl Peer {
                 result = Peer::receive_message_from_owning_torrent(&mut rx) => {
                     match result {
                         Some(message) => match message {
-                            torrent::TorrentToPeer::Choke => {
+                            messages::TorrentToPeer::Choke => {
                                 self.choke_state = ChokeState::Choked;
                                 self.send_choke().await?
                             },
-                            torrent::TorrentToPeer::NotChoked => {
+                            messages::TorrentToPeer::NotChoked => {
                                 self.choke_state = ChokeState::NotChoked;
                                 self.send_unchoke().await?
                             },
-                            torrent::TorrentToPeer::Interested => {
+                            messages::TorrentToPeer::Interested => {
                                 self.interest_state = InterestState::Interested;
                                 self.send_interested().await?
                             },
-                            torrent::TorrentToPeer::NotInterested => {
+                            messages::TorrentToPeer::NotInterested => {
                                 self.interest_state = InterestState::NotInterested;
                                 self.send_not_interested().await?
                             },
@@ -308,7 +308,7 @@ impl Peer {
     async fn register_with_owning_torrent(&mut self) -> Result<(), std::io::Error> {
         let (torrent_to_peer_tx, torrent_to_peer_rx) = tokio::sync::mpsc::channel(32);
         self.torrent_to_peer_rx = Some(torrent_to_peer_rx);
-        self.send_to_owned_torrent(PeerToTorrent::Register {
+        self.send_to_owned_torrent(messages::PeerToTorrent::Register {
             remote_peer_id: self
                 .remote_peer_id
                 .expect("remote peer id must be known and set here"),
@@ -319,14 +319,17 @@ impl Peer {
 
     #[instrument(skip(self))]
     async fn deregister_with_owning_torrent(&mut self) -> Result<(), std::io::Error> {
-        self.send_to_owned_torrent(PeerToTorrent::Deregister {
+        self.send_to_owned_torrent(messages::PeerToTorrent::Deregister {
             remote_peer_id: self.remote_peer_id.unwrap(),
         })
         .await
     }
 
     #[instrument(skip(self))]
-    async fn send_to_owned_torrent(&self, message: PeerToTorrent) -> Result<(), std::io::Error> {
+    async fn send_to_owned_torrent(
+        &self,
+        message: messages::PeerToTorrent,
+    ) -> Result<(), std::io::Error> {
         self.peer_to_torrent_tx
             .send(message)
             .await
@@ -337,25 +340,14 @@ impl Peer {
     // this exists as a free function because it allows us to do a partial borrow of the Self struct's contents,
     // rather than mutable borrowing the entire Self, which can only be done once in a scope
     async fn receive_message_from_owning_torrent(
-        rx: &mut tokio::sync::mpsc::Receiver<torrent::TorrentToPeer>,
-    ) -> Option<torrent::TorrentToPeer> {
+        rx: &mut tokio::sync::mpsc::Receiver<messages::TorrentToPeer>,
+    ) -> Option<messages::TorrentToPeer> {
         rx.recv().await
     }
 }
 
 struct Timers {
     keepalive: Interval,
-}
-
-#[derive(Debug)]
-pub(crate) enum PeerToTorrent {
-    Register {
-        remote_peer_id: PeerId,
-        torrent_to_peer_tx: tokio::sync::mpsc::Sender<torrent::TorrentToPeer>,
-    },
-    Deregister {
-        remote_peer_id: PeerId,
-    },
 }
 
 #[derive(Debug)]

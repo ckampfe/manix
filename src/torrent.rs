@@ -1,6 +1,6 @@
 use crate::listener::{self, Listener};
+use crate::messages;
 use crate::metainfo::MetaInfo;
-use crate::peer;
 use crate::InfoHash;
 use crate::{PeerId, Port};
 use bitvec::order::Lsb0;
@@ -35,7 +35,7 @@ pub struct Torrent {
     peer_id: PeerId,
     meta_info: MetaInfo,
     torrent_data: PathBuf,
-    peers: HashMap<PeerId, tokio::sync::mpsc::Sender<TorrentToPeer>>,
+    peers: HashMap<PeerId, tokio::sync::mpsc::Sender<messages::TorrentToPeer>>,
     port: Port,
     uploaded: usize,
     downloaded: usize,
@@ -44,8 +44,8 @@ pub struct Torrent {
     listener: Option<Listener<String>>,
     global_max_peer_connections: Arc<tokio::sync::Semaphore>,
     torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
-    peer_to_torrent_tx: tokio::sync::mpsc::Sender<peer::PeerToTorrent>,
-    peer_to_torrent_rx: tokio::sync::mpsc::Receiver<peer::PeerToTorrent>,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
+    peer_to_torrent_rx: tokio::sync::mpsc::Receiver<messages::PeerToTorrent>,
     event_loop_interrupt_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -344,11 +344,11 @@ impl Torrent {
                 message = self.peer_to_torrent_rx.recv() => {
                     match message {
                         Some(message) => match message {
-                            peer::PeerToTorrent::Register { remote_peer_id, torrent_to_peer_tx } => {
+                            messages::PeerToTorrent::Register { remote_peer_id, torrent_to_peer_tx } => {
                                 info!("registered remote peer {}", remote_peer_id);
                                 self.peers.insert(remote_peer_id, torrent_to_peer_tx);
                             },
-                            peer::PeerToTorrent::Deregister {remote_peer_id } => {
+                            messages::PeerToTorrent::Deregister {remote_peer_id } => {
                                 info!("deregistered remote peer {}", remote_peer_id);
                                 self.peers.remove(&remote_peer_id);
                             }
@@ -381,13 +381,6 @@ impl Torrent {
             debug_timer,
         }
     }
-}
-
-pub(crate) enum TorrentToPeer {
-    Choke,
-    NotChoked,
-    Interested,
-    NotInterested,
 }
 
 #[derive(Clone, Copy, Debug)]

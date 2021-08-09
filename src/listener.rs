@@ -1,12 +1,11 @@
-use std::sync::Arc;
-
+use crate::messages;
+use crate::peer::Peer;
+use crate::{InfoHash, PeerId};
 use futures_util::future::TryFutureExt;
+use std::sync::Arc;
 use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio::try_join;
 use tracing::{debug, instrument};
-
-use crate::peer::{Peer, PeerToTorrent};
-use crate::{InfoHash, PeerId};
 
 #[derive(Debug)]
 pub(crate) struct Listener<A: ToSocketAddrs> {
@@ -15,7 +14,7 @@ pub(crate) struct Listener<A: ToSocketAddrs> {
     info_hash: InfoHash,
     global_max_peer_connections: Arc<tokio::sync::Semaphore>,
     torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
-    peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
     listener: Option<TcpListener>,
 }
 
@@ -26,7 +25,7 @@ impl<A: ToSocketAddrs + Clone + std::fmt::Debug> Listener<A> {
         info_hash: InfoHash,
         global_max_peer_connections: Arc<tokio::sync::Semaphore>,
         torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
-        peer_to_torrent_tx: tokio::sync::mpsc::Sender<PeerToTorrent>,
+        peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
     ) -> Self
     where
         A: ToSocketAddrs,
