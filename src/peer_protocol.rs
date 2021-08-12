@@ -28,11 +28,12 @@ pub(crate) const REQUEST: u8 = 6;
 pub(crate) const PIECE: u8 = 7;
 pub(crate) const CANCEL: u8 = 8;
 
-pub(crate) struct MessageDecoder;
+#[derive(Debug)]
+pub(crate) struct MessageCodec;
 
 const MAX: usize = 8 * 1024 * 1024;
 
-impl tokio_util::codec::Decoder for MessageDecoder {
+impl tokio_util::codec::Decoder for MessageCodec {
     type Item = Message;
 
     type Error = std::io::Error;
@@ -73,19 +74,37 @@ impl tokio_util::codec::Decoder for MessageDecoder {
         let data = src[4..4 + length].to_vec();
         src.advance(4 + length);
 
-        // Convert the data to a string, or fail if it is not valid utf-8.
-        // match String::from_utf8(data) {
-        //     Ok(string) => Ok(Some(string)),
-        //     Err(utf8_error) => Err(std::io::Error::new(
-        //         std::io::ErrorKind::InvalidData,
-        //         utf8_error.utf8_error(),
-        //     )),
-        // }
         let message = Message::try_from(data).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "couldn't form message")
         })?;
 
         Ok(Some(message))
+    }
+}
+
+impl tokio_util::codec::Encoder<Message> for MessageCodec {
+    type Error = std::io::Error;
+
+    fn encode(&mut self, item: Message, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        // if item.len() > MAX {
+        //     return Err(std::io::Error::new(
+        //         std::io::ErrorKind::InvalidData,
+        //         format!("Frame of length {} is too large.", item.len()),
+        //     ));
+        // }
+        // Convert the length into a byte array.
+        // The cast to u32 cannot overflow due to the length check above.
+
+        // let len_slice = u32::to_le_bytes(item.len() as u32);
+        // Reserve space in the buffer.
+        let as_bytes: Vec<u8> = item.into();
+        // dst.reserve(4 + item.len());
+        dst.reserve(as_bytes.len());
+
+        // Write the length and string to the buffer.
+        // dst.extend_from_slice(&len_slice);
+        dst.extend_from_slice(&as_bytes);
+        Ok(())
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::messages;
 use crate::peer::{Peer, PeerOptions};
 use crate::{InfoHash, PeerId};
-use futures_util::future::TryFutureExt;
+use futures_util::TryFutureExt;
 use std::sync::Arc;
 use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio::try_join;

@@ -1,7 +1,8 @@
-use crate::peer_protocol::{self, HANDSHAKE_LENGTH};
+use crate::peer_protocol;
 use crate::{messages, Begin, Index, InfoHash, Length, PeerId};
-use std::convert::{TryFrom, TryInto};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures_util::sink::SinkExt;
+use futures_util::StreamExt;
+use std::convert::TryInto;
 use tokio::net::TcpStream;
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::{debug, error, info, instrument, trace};
@@ -20,7 +21,7 @@ pub(crate) struct PeerOptions {
 
 #[derive(Debug)]
 pub(crate) struct Peer {
-    socket: tokio::net::TcpStream,
+    framed: tokio_util::codec::Framed<tokio::net::TcpStream, peer_protocol::MessageCodec>,
     peer_id: PeerId,
     remote_peer_id: Option<PeerId>,
     info_hash: InfoHash,
@@ -37,11 +38,10 @@ pub(crate) struct Peer {
 impl Peer {
     #[instrument]
     pub(crate) fn new(options: PeerOptions) -> Self {
-        let framed_reader =
-            tokio_util::codec::FramedRead::new(options.socket, peer_protocol::MessageDecoder);
+        let framed = tokio_util::codec::Framed::new(options.socket, peer_protocol::MessageCodec);
 
         Self {
-            socket: options.socket,
+            framed,
             peer_id: options.peer_id,
             remote_peer_id: None,
             info_hash: options.info_hash,
@@ -95,7 +95,7 @@ impl Peer {
             tokio::select! {
                 result = self.receive_message() => {
                     match result {
-                        Ok(message) => {
+                        Some(Ok(message)) => {
                             match message {
                                 peer_protocol::Message::Keepalive => {
                                     info!("Receieved keepalive from peer")
@@ -130,11 +130,12 @@ impl Peer {
                                 },
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             error!("{:#?}", e.to_string());
                             self.deregister_with_owning_torrent().await?;
                             return Err(e);
                         }
+                        None => todo!("not sure what this branch represents"),
                     }
                 }
                 result = Peer::receive_message_from_owning_torrent(&mut rx) => {
@@ -197,35 +198,42 @@ impl Peer {
         self.send_handshake().await?;
         trace!("HANDSHAKE SENT");
 
-        let handshake = self.receive_handshake().await?;
+        let handshake = self.receive_handshake().await;
         trace!("HANDSHAKE RECEIVED");
 
-        if let peer_protocol::Message::Handshake {
-            peer_id: remote_peer_id,
-            info_hash: remote_info_hash,
-            ..
-        } = handshake
+        if let Some(message) = handshake
         // if the info hashes match, we can proceed
         // if not, sever the connection and drop the semaphore permit
         {
-            if self.info_hash == remote_info_hash {
-                trace!("HANDSHAKE WAS GOOD");
-                Ok(remote_peer_id)
+            let message = message?;
+            if let peer_protocol::Message::Handshake {
+                peer_id: remote_peer_id,
+                info_hash: remote_info_hash,
+                ..
+            } = message
+            {
+                if self.info_hash == remote_info_hash {
+                    trace!("HANDSHAKE WAS GOOD");
+                    Ok(remote_peer_id)
+                } else {
+                    trace!("HANDSHAKE WAS BAD1");
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "remote info_hash did not match local info hash",
+                    ))
+                }
             } else {
-                trace!("HANDSHAKE WAS BAD1");
+                trace!("HANDSHAKE WAS BAD2");
                 Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "remote info_hash did not match local info hash",
+                    std::io::ErrorKind::Other,
+                    "received a non-handshake message when was expecting handshake",
                 ))
             }
+
             // otherwise if the message is NOT a handshake, it is invalid,
             // so drop the permit and the connection
         } else {
-            trace!("HANDSHAKE WAS BAD2");
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "received a non-handshake message when was expecting handshake",
-            ))
+            panic!()
         }
     }
 
@@ -344,38 +352,54 @@ impl Peer {
         &mut self,
         message: peer_protocol::Message,
     ) -> Result<(), std::io::Error> {
-        let bytes: Vec<u8> = message.into();
-        self.socket.write_all(&bytes).await
+        // let bytes: Vec<u8> = message.into();
+        // self.socket.write_all(&bytes).await
+        // let codec = self.framed.codec_mut();
+        // let mut buf = &mut BytesMut::new();
+        // codec.encode(message, &mut buf)
+
+        self.framed.send(message).await
     }
 
-    async fn receive_message(&mut self) -> Result<peer_protocol::Message, std::io::Error> {
-        let message_length = self.receive_length().await?;
+    async fn receive_message(&mut self) -> Option<Result<peer_protocol::Message, std::io::Error>> {
+        // let message_length = self.receive_length().await?;
 
-        // TODO: does this need to be fully initialized with 0u8 values
-        // in order for it to be filled by `read_exact`?
-        let mut buf = Vec::with_capacity(message_length as usize);
+        // // TODO: does this need to be fully initialized with 0u8 values
+        // // in order for it to be filled by `read_exact`?
+        // let mut buf = Vec::with_capacity(message_length as usize);
 
-        self.socket.read_exact(&mut buf).await?;
+        // self.socket.read_exact(&mut buf).await?;
 
-        peer_protocol::Message::try_from(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        // peer_protocol::Message::try_from(buf)
+        //     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+
+        // let codec = self.framed.codec_mut();
+        // let mut buf = self.framed.read_buffer_mut();
+        // codec.decode(&mut buf)
+        self.framed.next().await
     }
 
-    async fn receive_handshake(&mut self) -> Result<peer_protocol::Message, std::io::Error> {
-        // handshake buf has to be fully filled with bytes, not just allocated capacity with `Vec::with_capacity`.
-        let mut buf = vec![0u8; HANDSHAKE_LENGTH];
-        self.socket.read_exact(&mut buf).await?;
+    async fn receive_handshake(
+        &mut self,
+    ) -> Option<Result<peer_protocol::Message, std::io::Error>> {
+        // // handshake buf has to be fully filled with bytes, not just allocated capacity with `Vec::with_capacity`.
+        // let mut buf = vec![0u8; HANDSHAKE_LENGTH];
+        // self.socket.read_exact(&mut buf).await?;
 
-        peer_protocol::Message::try_from(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        // peer_protocol::Message::try_from(buf)
+        //     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        // let codec = self.framed.codec_mut();
+        // let mut buf = &mut BytesMut::new();
+        // codec.decode(&mut buf)
+        self.receive_message().await
     }
 
-    async fn receive_length(&mut self) -> Result<u32, std::io::Error> {
-        let mut length_bytes: [u8; 4] = [0; 4];
-        self.socket.read_exact(&mut length_bytes).await?;
-        dbg!(length_bytes);
-        Ok(u32::from_be_bytes(length_bytes))
-    }
+    // async fn receive_length(&mut self) -> Result<u32, std::io::Error> {
+    //     let mut length_bytes: [u8; 4] = [0; 4];
+    //     self.socket.read_exact(&mut length_bytes).await?;
+    //     dbg!(length_bytes);
+    //     Ok(u32::from_be_bytes(length_bytes))
+    // }
 
     #[instrument(skip(self))]
     async fn register_with_owning_torrent(&mut self) -> Result<(), std::io::Error> {

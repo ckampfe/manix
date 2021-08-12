@@ -8,7 +8,7 @@ edition = "2018"
 [dependencies]
 bitvec = "0.22"
 bytes = "1"
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
 hex = "0.4"
 # nom_bencode = { git = "https://github.com/ckampfe/nom_bencode", branch = "display" }
 # nom_bencode = { path = "/Users/clark/code/nom_bencode" }
