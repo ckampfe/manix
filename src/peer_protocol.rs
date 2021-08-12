@@ -1,6 +1,7 @@
 use crate::{Begin, Index, InfoHash, Length, PeerId};
 use bitvec::order::Msb0;
 use bitvec::prelude::{bitvec, BitVec};
+use bytes::Buf;
 use std::convert::{TryFrom, TryInto};
 use std::ops::BitOrAssign;
 use std::ops::{Deref, DerefMut};
@@ -26,6 +27,67 @@ pub(crate) const BITFIELD: u8 = 5;
 pub(crate) const REQUEST: u8 = 6;
 pub(crate) const PIECE: u8 = 7;
 pub(crate) const CANCEL: u8 = 8;
+
+pub(crate) struct MessageDecoder;
+
+const MAX: usize = 8 * 1024 * 1024;
+
+impl tokio_util::codec::Decoder for MessageDecoder {
+    type Item = Message;
+
+    type Error = std::io::Error;
+
+    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < 4 {
+            // Not enough data to read length marker.
+            return Ok(None);
+        }
+
+        // Read length marker.
+        let mut length_bytes = [0u8; 4];
+        length_bytes.copy_from_slice(&src[..4]);
+        let length = u32::from_le_bytes(length_bytes) as usize;
+
+        // Check that the length is not too large to avoid a denial of
+        // service attack where the server runs out of memory.
+        if length > MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Frame of length {} is too large.", length),
+            ));
+        }
+
+        if src.len() < 4 + length {
+            // The full string has not yet arrived.
+            //
+            // We reserve more space in the buffer. This is not strictly
+            // necessary, but is a good idea performance-wise.
+            src.reserve(4 + length - src.len());
+
+            // We inform the Framed that we need more bytes to form the next
+            // frame.
+            return Ok(None);
+        }
+        // Use advance to modify src such that it no longer contains
+        // this frame.
+        let data = src[4..4 + length].to_vec();
+        src.advance(4 + length);
+
+        // Convert the data to a string, or fail if it is not valid utf-8.
+        // match String::from_utf8(data) {
+        //     Ok(string) => Ok(Some(string)),
+        //     Err(utf8_error) => Err(std::io::Error::new(
+        //         std::io::ErrorKind::InvalidData,
+        //         utf8_error.utf8_error(),
+        //     )),
+        // }
+        let message = Message::try_from(data).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "couldn't form message")
+        })?;
+
+        Ok(Some(message))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Message {
@@ -280,6 +342,39 @@ pub(crate) fn encode_number(n: u32) -> [u8; 4] {
 
 pub(crate) fn decode_number(bytes: [u8; 4]) -> u32 {
     u32::from_be_bytes(bytes)
+}
+
+// Torrents are composed of "pieces".
+// Pieces have a 20-byte SHA-1 hash.
+// Pieces are composed of an undocumented subunit called "chunks".
+// When a peer wants a piece, the peer has to ask for:
+// - The piece index
+// - The chunk offset within the piece (starting at byte 0)
+// - The length of the chunk
+pub(crate) fn chunk_offsets_lengths(
+    piece_length: usize,
+    chunk_length: usize,
+) -> Vec<(usize, usize)> {
+    let mut remaining_length = piece_length;
+    let mut i = 0;
+    let mut offsets = vec![];
+
+    let chunks_per_piece = piece_length / chunk_length;
+    dbg!(chunks_per_piece);
+
+    while i < chunks_per_piece {
+        let offset = chunk_length * i;
+        offsets.push((offset, chunk_length));
+        i += 1;
+        remaining_length -= chunk_length;
+    }
+
+    if remaining_length > 0 {
+        let offset = chunk_length * i;
+        offsets.push((offset, remaining_length));
+    }
+
+    offsets
 }
 
 #[cfg(test)]
@@ -631,6 +726,44 @@ mod tests {
                 peer_id,
                 info_hash
             }
+        );
+    }
+
+    const THIRTY_TWO_K: usize = 2usize.pow(15);
+    const SIXTY_FOUR_K: usize = 2usize.pow(16);
+    const ONE_HUNDRED_TWENTY_EIGHT_K: usize = 2usize.pow(17);
+
+    #[test]
+    fn offsets() {
+        // piece of length SIXTY_FOUR_K
+        let offsets = chunk_offsets_lengths(SIXTY_FOUR_K, THIRTY_TWO_K);
+        assert_eq!(
+            offsets,
+            vec![(0, THIRTY_TWO_K), (THIRTY_TWO_K, THIRTY_TWO_K)]
+        );
+
+        // regular piece of length ONE_HUNDRED_TWENTY_EIGHT_K
+        let offsets = chunk_offsets_lengths(ONE_HUNDRED_TWENTY_EIGHT_K, THIRTY_TWO_K);
+        assert_eq!(
+            offsets,
+            vec![
+                (0, THIRTY_TWO_K),
+                (THIRTY_TWO_K, THIRTY_TWO_K),
+                (THIRTY_TWO_K * 2, THIRTY_TWO_K),
+                (THIRTY_TWO_K * 3, THIRTY_TWO_K)
+            ]
+        );
+
+        // irregular piece of length SIXTY_FOUR_K + 10
+        // note the lengths of the chunks: the length of the last chunk is 10
+        let offsets = chunk_offsets_lengths(SIXTY_FOUR_K + 10, THIRTY_TWO_K);
+        assert_eq!(
+            offsets,
+            vec![
+                (0, THIRTY_TWO_K),
+                (THIRTY_TWO_K, THIRTY_TWO_K),
+                (THIRTY_TWO_K * 2, 10)
+            ]
         );
     }
 }

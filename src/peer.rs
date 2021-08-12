@@ -1,10 +1,22 @@
 use crate::peer_protocol::{self, HANDSHAKE_LENGTH};
 use crate::{messages, Begin, Index, InfoHash, Length, PeerId};
-use std::convert::TryFrom;
+use std::convert::{TryFrom, TryInto};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Interval, MissedTickBehavior};
-use tracing::{error, info, instrument, trace};
+use tracing::{debug, error, info, instrument, trace};
+
+#[derive(Debug)]
+pub(crate) struct PeerOptions {
+    pub(crate) socket: TcpStream,
+    pub(crate) peer_id: PeerId,
+    pub(crate) info_hash: InfoHash,
+    pub(crate) peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
+    pub(crate) global_permit: tokio::sync::OwnedSemaphorePermit,
+    pub(crate) torrent_permit: tokio::sync::OwnedSemaphorePermit,
+    pub(crate) piece_length: usize,
+    pub(crate) chunk_length: usize,
+}
 
 #[derive(Debug)]
 pub(crate) struct Peer {
@@ -18,29 +30,29 @@ pub(crate) struct Peer {
     torrent_permit: tokio::sync::OwnedSemaphorePermit,
     choke_state: ChokeState,
     interest_state: InterestState,
+    piece_length: usize,
+    chunk_length: usize,
 }
 
 impl Peer {
     #[instrument]
-    pub(crate) fn new(
-        socket: TcpStream,
-        peer_id: PeerId,
-        info_hash: InfoHash,
-        peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
-        global_permit: tokio::sync::OwnedSemaphorePermit,
-        torrent_permit: tokio::sync::OwnedSemaphorePermit,
-    ) -> Self {
+    pub(crate) fn new(options: PeerOptions) -> Self {
+        let framed_reader =
+            tokio_util::codec::FramedRead::new(options.socket, peer_protocol::MessageDecoder);
+
         Self {
-            socket,
-            peer_id,
+            socket: options.socket,
+            peer_id: options.peer_id,
             remote_peer_id: None,
-            info_hash,
-            peer_to_torrent_tx,
+            info_hash: options.info_hash,
+            peer_to_torrent_tx: options.peer_to_torrent_tx,
             torrent_to_peer_rx: None,
-            global_permit,
-            torrent_permit,
+            global_permit: options.global_permit,
+            torrent_permit: options.torrent_permit,
             choke_state: ChokeState::Choked,
             interest_state: InterestState::NotInterested,
+            piece_length: options.piece_length,
+            chunk_length: options.chunk_length,
         }
     }
 
@@ -66,6 +78,12 @@ impl Peer {
         self.send_bitfield(current_bitfield).await?;
         info!("Sent bitfield to peer");
 
+        self.send_unchoke().await?;
+        info!("Sent unchoke to peer");
+
+        self.send_interested().await?;
+        info!("Sent interested");
+
         let Timers { mut keepalive } = self.start_timers().await;
 
         info!("Started peer timers");
@@ -80,28 +98,31 @@ impl Peer {
                         Ok(message) => {
                             match message {
                                 peer_protocol::Message::Keepalive => {
-                                    info!("Receieved keepalive")
+                                    info!("Receieved keepalive from peer")
                                 },
                                 peer_protocol::Message::Choke => {
-                                    info!("Received choke");
+                                    info!("Received choke from peer");
                                     self.send_choke().await?
                                 },
                                 peer_protocol::Message::Unchoke => {
-                                    info!("Received unchoke");
+                                    info!("Received unchoke from peer");
+                                    self.send_unchoke().await?;
                                 },
                                 peer_protocol::Message::Interested => {
-                                    info!("Received interested");
+                                    info!("Received interested from peer");
                                 },
                                 peer_protocol::Message::NotInterested => {
-                                    info!("Received not interested");
+                                    info!("Received not interested from peer");
                                 },
                                 peer_protocol::Message::Have { index: _ } => todo!(),
                                 peer_protocol::Message::Bitfield { bitfield } => {
-                                    info!("Received bitfield");
+                                    info!("Received bitfield from peer");
                                     self.report_bitfield(bitfield).await?;
                                 },
                                 peer_protocol::Message::Request { index: _, begin: _, length: _ } => todo!(),
-                                peer_protocol::Message::Piece { index: _, begin: _, chunk: _ } => todo!(),
+                                peer_protocol::Message::Piece { index, begin, chunk: _ } => {
+                                    info!("Received piece ({}, {})", index, begin)
+                                },
                                 peer_protocol::Message::Cancel { index: _, begin: _, length: _ } => todo!(),
                                 peer_protocol::Message::Handshake { protocol_extension_bytes: _, peer_id: _, info_hash: _ } => {
                                     error!("shouldn't receive this handshake, but we did!");
@@ -135,8 +156,21 @@ impl Peer {
                                 self.interest_state = InterestState::NotInterested;
                                 self.send_not_interested().await?
                             },
+                            messages::TorrentToPeer::GetPiece(index) => {
+                                let offsets = peer_protocol::chunk_offsets_lengths(self.piece_length, self.chunk_length);
+                                for (chunk_offset, chunk_length) in offsets {
+                                    self.send_request(
+                                        index.try_into().unwrap(),
+                                        chunk_offset.try_into().unwrap(),
+                                        chunk_length.try_into().unwrap()
+                                    ).await?;
+                                }
+                            }
                         },
-                        None => todo!(),
+                        None => {
+                            debug!("Torrent to peer channel closed, disconnecting");
+                            return Ok(());
+                        },
                     }
                 }
                 _ = keepalive.tick() => {
@@ -339,6 +373,7 @@ impl Peer {
     async fn receive_length(&mut self) -> Result<u32, std::io::Error> {
         let mut length_bytes: [u8; 4] = [0; 4];
         self.socket.read_exact(&mut length_bytes).await?;
+        dbg!(length_bytes);
         Ok(u32::from_be_bytes(length_bytes))
     }
 

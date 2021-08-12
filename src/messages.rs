@@ -1,11 +1,13 @@
 use crate::peer_protocol;
 use crate::PeerId;
 
+#[derive(Debug)]
 pub(crate) enum TorrentToPeer {
     Choke,
     NotChoked,
     Interested,
     NotInterested,
+    GetPiece(usize),
 }
 
 #[derive(Debug)]
