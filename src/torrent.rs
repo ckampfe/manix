@@ -141,7 +141,7 @@ impl Torrent {
 
         let (interrupt_tx, interrupt_rx) = tokio::sync::oneshot::channel();
         self.event_loop_interrupt_tx = Some(interrupt_tx);
-        self.enter_event_loop(interrupt_rx).await?;
+        self.event_loop(interrupt_rx).await?;
         Ok(())
     }
 
@@ -348,7 +348,7 @@ impl Torrent {
 // PRIVATE
 impl Torrent {
     #[instrument(skip(self, interrupt_rx))]
-    async fn enter_event_loop(
+    async fn event_loop(
         &mut self,
         mut interrupt_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), std::io::Error> {
