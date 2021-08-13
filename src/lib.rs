@@ -4,6 +4,7 @@ use std::fmt::Display;
 
 pub mod async_client;
 pub mod blocking_client;
+mod handshake_peer;
 mod listener;
 mod messages;
 mod metainfo;

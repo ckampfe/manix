@@ -5,7 +5,10 @@ use bytes::Buf;
 use std::convert::{TryFrom, TryInto};
 use std::ops::BitOrAssign;
 use std::ops::{Deref, DerefMut};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::codec::{Decoder, Encoder, Framed};
 
+const MAX_MESSAGE_LENGTH: usize = 8 * 1024 * 1024;
 const HANDSHAKE_LENGTH_LENGTH: usize = 1;
 const BITTORRENT_PROTOCOL: &[u8] = b"BitTorrent protocol";
 pub(crate) const PROTOCOL_EXTENSION_HEADER: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -28,11 +31,102 @@ pub(crate) const REQUEST: u8 = 6;
 pub(crate) const PIECE: u8 = 7;
 pub(crate) const CANCEL: u8 = 8;
 
+#[derive(Debug, PartialEq)]
+pub(crate) struct Handshake {
+    pub(crate) protocol_extension_bytes: [u8; 8],
+    pub(crate) peer_id: PeerId,
+    pub(crate) info_hash: InfoHash,
+}
+
+impl From<Handshake> for Vec<u8> {
+    fn from(handshake: Handshake) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(HANDSHAKE_LENGTH);
+        bytes.push(19);
+        bytes.extend_from_slice(BITTORRENT_PROTOCOL);
+        bytes.extend_from_slice(&handshake.protocol_extension_bytes);
+        bytes.extend_from_slice(handshake.info_hash.as_ref());
+        bytes.extend_from_slice(handshake.peer_id.as_ref());
+        bytes
+    }
+}
+
+impl TryFrom<Vec<u8>> for Handshake {
+    type Error = String;
+
+    #[allow(clippy::many_single_char_names)]
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        match &value[..] {
+            // '19' + "BitTorrent protocol"
+            [19, b'B', b'i', b't', b'T', b'o', b'r', b'r', b'e', b'n', b't', b' ', b'p', b'r', b'o', b't', b'o', b'c', b'o', b'l', rest @ ..] =>
+            {
+                let (protocol_extension_bytes, rest) = rest.split_at(8);
+                let (info_hash, peer_id) = rest.split_at(20);
+
+                let protocol_extension_bytes: [u8; 8] = protocol_extension_bytes
+                    .try_into()
+                    .expect("Protocol extension bytes must be length 20");
+                let peer_id: PeerId =
+                    PeerId(peer_id[..20].try_into().expect("Peer ID must be length 20"));
+                let info_hash: InfoHash =
+                    InfoHash(info_hash.try_into().expect("Info hash must be length 20"));
+
+                Ok(Handshake {
+                    protocol_extension_bytes,
+                    peer_id,
+                    info_hash,
+                })
+            }
+            _ => Err("Could not decode bencoded peer message".to_string()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HandshakeCodec;
+
+impl tokio_util::codec::Decoder for HandshakeCodec {
+    type Item = Handshake;
+
+    type Error = std::io::Error;
+
+    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < HANDSHAKE_LENGTH {
+            src.reserve(HANDSHAKE_LENGTH);
+            return Ok(None);
+        }
+
+        let data = src[0..HANDSHAKE_LENGTH].to_vec();
+
+        src.advance(HANDSHAKE_LENGTH);
+
+        let handshake = Handshake::try_from(data).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "couldn't form message")
+        })?;
+
+        Ok(Some(handshake))
+    }
+}
+
+impl tokio_util::codec::Encoder<Handshake> for HandshakeCodec {
+    type Error = std::io::Error;
+
+    fn encode(&mut self, item: Handshake, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        let as_bytes: Vec<u8> = item.into();
+        // dst.reserve(4 + item.len());
+        dst.reserve(as_bytes.len());
+
+        // Write the length and string to the buffer.
+        // dst.extend_from_slice(&len_slice);
+        dst.extend_from_slice(&as_bytes);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct MessageCodec;
 
-const MAX: usize = 8 * 1024 * 1024;
-
+// ideally, this should be split into two codecs:
+// one for the handshake and one for the regular frames
 impl tokio_util::codec::Decoder for MessageCodec {
     type Item = Message;
 
@@ -47,11 +141,11 @@ impl tokio_util::codec::Decoder for MessageCodec {
         // Read length marker.
         let mut length_bytes = [0u8; 4];
         length_bytes.copy_from_slice(&src[..4]);
-        let length = u32::from_le_bytes(length_bytes) as usize;
+        let length = u32::from_be_bytes(length_bytes) as usize;
 
         // Check that the length is not too large to avoid a denial of
         // service attack where the server runs out of memory.
-        if length > MAX {
+        if length > MAX_MESSAGE_LENGTH {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Frame of length {} is too large.", length),
@@ -108,6 +202,17 @@ impl tokio_util::codec::Encoder<Message> for MessageCodec {
     }
 }
 
+pub(crate) fn set_codec<T: AsyncRead + AsyncWrite, C1, E, C2: Encoder<E> + Decoder>(
+    framed: Framed<T, C1>,
+    codec: C2,
+) -> Framed<T, C2> {
+    let parts1 = framed.into_parts();
+    let mut parts2 = Framed::new(parts1.io, codec).into_parts();
+    parts2.read_buf = parts1.read_buf;
+    parts2.write_buf = parts1.write_buf;
+    Framed::from_parts(parts2)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Message {
     /// empty
@@ -141,11 +246,6 @@ pub(crate) enum Message {
         index: Index,
         begin: Begin,
         length: Length,
-    },
-    Handshake {
-        protocol_extension_bytes: [u8; 8],
-        peer_id: PeerId,
-        info_hash: InfoHash,
     },
 }
 
@@ -231,19 +331,6 @@ impl From<Message> for Vec<u8> {
                 bytes.extend_from_slice(&encode_number(length));
                 bytes
             }
-            Message::Handshake {
-                protocol_extension_bytes,
-                peer_id,
-                info_hash,
-            } => {
-                let mut bytes = Vec::with_capacity(HANDSHAKE_LENGTH);
-                bytes.push(19);
-                bytes.extend_from_slice(BITTORRENT_PROTOCOL);
-                bytes.extend_from_slice(&protocol_extension_bytes);
-                bytes.extend_from_slice(info_hash.as_ref());
-                bytes.extend_from_slice(peer_id.as_ref());
-                bytes
-            }
         }
     }
 }
@@ -299,26 +386,6 @@ impl TryFrom<Vec<u8>> for Message {
                     index,
                     begin,
                     length,
-                })
-            }
-            // '19' + "BitTorrent protocol"
-            [19, b'B', b'i', b't', b'T', b'o', b'r', b'r', b'e', b'n', b't', b' ', b'p', b'r', b'o', b't', b'o', b'c', b'o', b'l', rest @ ..] =>
-            {
-                let (protocol_extension_bytes, rest) = rest.split_at(8);
-                let (info_hash, peer_id) = rest.split_at(20);
-
-                let protocol_extension_bytes: [u8; 8] = protocol_extension_bytes
-                    .try_into()
-                    .expect("Protocol extension bytes must be length 20");
-                let peer_id: PeerId =
-                    PeerId(peer_id[..20].try_into().expect("Peer ID must be length 20"));
-                let info_hash: InfoHash =
-                    InfoHash(info_hash.try_into().expect("Info hash must be length 20"));
-
-                Ok(Message::Handshake {
-                    protocol_extension_bytes,
-                    peer_id,
-                    info_hash,
                 })
             }
             _ => Err("Could not decode bencoded peer message".to_string()),
@@ -584,7 +651,7 @@ mod tests {
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
         ]);
 
-        let m = Message::Handshake {
+        let m = Handshake {
             protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
             peer_id,
             info_hash,
@@ -739,8 +806,8 @@ mod tests {
         m.extend_from_slice(peer_id.as_ref());
         m.extend_from_slice(info_hash.as_ref());
         assert_eq!(
-            Message::try_from(m).unwrap(),
-            Message::Handshake {
+            Handshake::try_from(m).unwrap(),
+            Handshake {
                 protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
                 peer_id,
                 info_hash

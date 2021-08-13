@@ -347,7 +347,7 @@ impl Torrent {
 
 // PRIVATE
 impl Torrent {
-    #[instrument(skip(self))]
+    #[instrument(skip(self, interrupt_rx))]
     async fn enter_event_loop(
         &mut self,
         mut interrupt_rx: tokio::sync::oneshot::Receiver<()>,
@@ -369,7 +369,8 @@ impl Torrent {
                         Ok(peer) => {
                             info!("accepted peer, attempting handshake...");
                             tokio::spawn(async move {
-                                peer.enter_event_loop().await
+                                let peer = peer.handshake_remote_peer().await?;
+                                peer.event_loop().await
                             });
                         },
                         Err(e) => {

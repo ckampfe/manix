@@ -1,5 +1,5 @@
+use crate::handshake_peer::{HandshakePeer, HandshakePeerOptions};
 use crate::messages;
-use crate::peer::{Peer, PeerOptions};
 use crate::{InfoHash, PeerId};
 use futures_util::TryFutureExt;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ impl<A: ToSocketAddrs + Clone + std::fmt::Debug> Listener<A> {
     }
 
     #[instrument(skip(self))]
-    pub(crate) async fn accept(&self) -> Result<Peer, std::io::Error> {
+    pub(crate) async fn accept(&self) -> Result<HandshakePeer, std::io::Error> {
         let global_max_peer_connections = self.global_max_peer_connections.clone();
         let torrent_max_peer_connections = self.torrent_max_peer_connections.clone();
         let peer_to_torrent_tx = self.peer_to_torrent_tx.clone();
@@ -96,7 +96,7 @@ impl<A: ToSocketAddrs + Clone + std::fmt::Debug> Listener<A> {
 
         debug!("4");
 
-        let peer_options = PeerOptions {
+        let peer_options = HandshakePeerOptions {
             socket,
             peer_id: self.peer_id,
             info_hash: self.info_hash,
@@ -107,7 +107,7 @@ impl<A: ToSocketAddrs + Clone + std::fmt::Debug> Listener<A> {
             chunk_length: self.chunk_length,
         };
 
-        let peer = Peer::new(peer_options);
+        let peer = HandshakePeer::new(peer_options);
 
         Ok(peer)
     }
