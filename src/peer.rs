@@ -187,18 +187,6 @@ impl Peer {
         Timers { keepalive }
     }
 
-    fn get_info_hash(&self) -> InfoHash {
-        self.info_hash
-    }
-
-    fn get_peer_id_machine_readable(&self) -> PeerId {
-        self.peer_id
-    }
-
-    // fn get_remote_peer_id_human_readable(&self) -> Option<String> {
-    //     self.remote_peer_id.map(|peer_id| peer_id.human_readable())
-    // }
-
     #[instrument(skip(self))]
     async fn send_keepalive(&mut self) -> Result<(), std::io::Error> {
         self.send_message(peer_protocol::Message::Keepalive).await

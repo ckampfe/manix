@@ -1,7 +1,7 @@
 use crate::{Begin, Index, InfoHash, Length, PeerId};
 use bitvec::order::Msb0;
 use bitvec::prelude::{bitvec, BitVec};
-use bytes::Buf;
+use bytes::{Buf, BufMut, BytesMut};
 use std::convert::{TryFrom, TryInto};
 use std::ops::BitOrAssign;
 use std::ops::{Deref, DerefMut};
@@ -38,15 +38,14 @@ pub(crate) struct Handshake {
     pub(crate) info_hash: InfoHash,
 }
 
-impl From<Handshake> for Vec<u8> {
-    fn from(handshake: Handshake) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(HANDSHAKE_LENGTH);
-        bytes.push(19);
-        bytes.extend_from_slice(BITTORRENT_PROTOCOL);
-        bytes.extend_from_slice(&handshake.protocol_extension_bytes);
-        bytes.extend_from_slice(handshake.info_hash.as_ref());
-        bytes.extend_from_slice(handshake.peer_id.as_ref());
-        bytes
+impl Handshake {
+    fn write_to_bytes(&self, buf: &mut BytesMut) {
+        buf.reserve(HANDSHAKE_LENGTH);
+        buf.put_u8(19);
+        buf.extend_from_slice(BITTORRENT_PROTOCOL);
+        buf.extend_from_slice(&self.protocol_extension_bytes);
+        buf.extend_from_slice(self.info_hash.as_ref());
+        buf.extend_from_slice(self.peer_id.as_ref());
     }
 }
 
@@ -99,9 +98,8 @@ impl tokio_util::codec::Decoder for HandshakeCodec {
 
         src.advance(HANDSHAKE_LENGTH);
 
-        let handshake = Handshake::try_from(data).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "couldn't form message")
-        })?;
+        let handshake = Handshake::try_from(data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         Ok(Some(handshake))
     }
@@ -111,93 +109,7 @@ impl tokio_util::codec::Encoder<Handshake> for HandshakeCodec {
     type Error = std::io::Error;
 
     fn encode(&mut self, item: Handshake, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        let as_bytes: Vec<u8> = item.into();
-        // dst.reserve(4 + item.len());
-        dst.reserve(as_bytes.len());
-
-        // Write the length and string to the buffer.
-        // dst.extend_from_slice(&len_slice);
-        dst.extend_from_slice(&as_bytes);
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct MessageCodec;
-
-// ideally, this should be split into two codecs:
-// one for the handshake and one for the regular frames
-impl tokio_util::codec::Decoder for MessageCodec {
-    type Item = Message;
-
-    type Error = std::io::Error;
-
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            // Not enough data to read length marker.
-            return Ok(None);
-        }
-
-        // Read length marker.
-        let mut length_bytes = [0u8; 4];
-        length_bytes.copy_from_slice(&src[..4]);
-        let length = u32::from_be_bytes(length_bytes) as usize;
-
-        // Check that the length is not too large to avoid a denial of
-        // service attack where the server runs out of memory.
-        if length > MAX_MESSAGE_LENGTH {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Frame of length {} is too large.", length),
-            ));
-        }
-
-        if src.len() < 4 + length {
-            // The full string has not yet arrived.
-            //
-            // We reserve more space in the buffer. This is not strictly
-            // necessary, but is a good idea performance-wise.
-            src.reserve(4 + length - src.len());
-
-            // We inform the Framed that we need more bytes to form the next
-            // frame.
-            return Ok(None);
-        }
-        // Use advance to modify src such that it no longer contains
-        // this frame.
-        let data = src[4..4 + length].to_vec();
-        src.advance(4 + length);
-
-        let message = Message::try_from(data).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "couldn't form message")
-        })?;
-
-        Ok(Some(message))
-    }
-}
-
-impl tokio_util::codec::Encoder<Message> for MessageCodec {
-    type Error = std::io::Error;
-
-    fn encode(&mut self, item: Message, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        // if item.len() > MAX {
-        //     return Err(std::io::Error::new(
-        //         std::io::ErrorKind::InvalidData,
-        //         format!("Frame of length {} is too large.", item.len()),
-        //     ));
-        // }
-        // Convert the length into a byte array.
-        // The cast to u32 cannot overflow due to the length check above.
-
-        // let len_slice = u32::to_le_bytes(item.len() as u32);
-        // Reserve space in the buffer.
-        let as_bytes: Vec<u8> = item.into();
-        // dst.reserve(4 + item.len());
-        dst.reserve(as_bytes.len());
-
-        // Write the length and string to the buffer.
-        // dst.extend_from_slice(&len_slice);
-        dst.extend_from_slice(&as_bytes);
+        item.write_to_bytes(dst);
         Ok(())
     }
 }
@@ -215,33 +127,33 @@ pub(crate) fn set_codec<T: AsyncRead + AsyncWrite, C1, E, C2: Encoder<E> + Decod
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Message {
-    /// empty
+    /// no tag byte
     Keepalive,
-    /// 0
+    /// tag byte = 0
     Choke,
-    /// 1
+    /// tag byte = 1
     Unchoke,
-    /// 2
+    /// tag byte = 2
     Interested,
-    /// 3
+    /// tag byte = 3
     NotInterested,
-    /// 4
+    /// tag byte = 4
     Have { index: Index },
-    /// 5
+    /// tag byte = 5
     Bitfield { bitfield: Bitfield },
-    /// 6
+    /// tag byte = 6
     Request {
         index: Index,
         begin: Begin,
         length: Length,
     },
-    /// 7
+    /// tag byte = 7
     Piece {
         index: Index,
         begin: Begin,
         chunk: Vec<u8>,
     },
-    /// 8
+    /// tag byte = 8
     Cancel {
         index: Index,
         begin: Begin,
@@ -249,87 +161,92 @@ pub(crate) enum Message {
     },
 }
 
-impl From<Message> for Vec<u8> {
-    fn from(msg: Message) -> Vec<u8> {
-        match msg {
-            Message::Keepalive => vec![],
+impl Message {
+    /// in the bittorrent protocol,
+    /// messages are of the form "LTV", or Length Type Value,
+    /// where Length is a 4 byte big endian u32,
+    /// Type is a single byte, and Value is a sequence of bytes
+    /// of length Length - 1 (for the type tag byte).
+    /// Keepalive alone has no Tag byte or Value, only a four-byte length of 0,
+    /// i.e., "0u8 0u8 0u8 0u8"
+    fn len(&self) -> usize {
+        // type length + value length
+        // only keepalive has no type length or value length
+        match self {
+            Message::Keepalive => 0,
+            Message::Choke => 1,
+            Message::Unchoke => 1,
+            Message::Interested => 1,
+            Message::NotInterested => 1,
+            Message::Have { .. } => 1 + 4,
+            Message::Bitfield { bitfield } => 1 + bitfield.as_raw_slice().len(),
+            Message::Request { .. } => 1 + 4 + 4 + 4,
+            Message::Piece { chunk, .. } => 1 + 4 + 4 + chunk.len(),
+            Message::Cancel { .. } => 1 + 4 + 4 + 4,
+        }
+    }
+
+    /// Length Type Value aka "LTV"
+    /// 4 length bytes, 1 type byte, value bytes
+    fn write_to_bytes(&self, buf: &mut BytesMut) {
+        let len_len = 4;
+        let value_len = self.len();
+        let len_slice = u32::to_be_bytes(value_len as u32);
+        buf.reserve(len_len + value_len);
+        buf.extend_from_slice(&len_slice);
+
+        match self {
+            Message::Keepalive => (),
             Message::Choke => {
-                let mut bytes = Vec::with_capacity(5);
-                bytes.extend_from_slice(&1u32.to_be_bytes());
-                bytes.push(CHOKE);
-                bytes
+                buf.put_u8(CHOKE);
             }
             Message::Unchoke => {
-                let mut bytes = Vec::with_capacity(5);
-                bytes.extend_from_slice(&1u32.to_be_bytes());
-                bytes.push(UNCHOKE);
-                bytes
+                buf.put_u8(UNCHOKE);
             }
             Message::Interested => {
-                let mut bytes = Vec::with_capacity(5);
-                bytes.extend_from_slice(&1u32.to_be_bytes());
-                bytes.push(INTERESTED);
-                bytes
+                buf.put_u8(INTERESTED);
             }
             Message::NotInterested => {
-                let mut bytes = Vec::with_capacity(5);
-                bytes.extend_from_slice(&1u32.to_be_bytes());
-                bytes.push(NOT_INTERESTED);
-                bytes
+                buf.put_u8(NOT_INTERESTED);
             }
             Message::Have { index } => {
-                let mut bytes = Vec::with_capacity(9);
-                bytes.extend_from_slice(&5u32.to_be_bytes());
-                bytes.push(HAVE);
-                bytes.extend_from_slice(&index.to_be_bytes());
-                bytes
+                buf.put_u8(HAVE);
+                buf.extend_from_slice(&index.to_be_bytes());
             }
             Message::Bitfield { bitfield } => {
                 let bitfield_as_bytes = bitfield.as_raw_slice();
-                let mut bytes = Vec::with_capacity(4 + 1 + bitfield_as_bytes.len());
-                bytes.extend_from_slice(&encode_number(1 + bitfield_as_bytes.len() as u32));
-                bytes.push(BITFIELD);
-                bytes.extend_from_slice(bitfield_as_bytes);
-                bytes
+                buf.put_u8(BITFIELD);
+                buf.extend_from_slice(bitfield_as_bytes);
             }
             Message::Request {
                 index,
                 begin,
                 length,
             } => {
-                let mut bytes = Vec::with_capacity(4 + 1 + 4 + 4 + 4);
-                bytes.extend_from_slice(&encode_number(13));
-                bytes.push(REQUEST);
-                bytes.extend_from_slice(&encode_number(index));
-                bytes.extend_from_slice(&encode_number(begin));
-                bytes.extend_from_slice(&encode_number(length));
-                bytes
+                buf.put_u8(REQUEST);
+                buf.extend_from_slice(&encode_number(*index));
+                buf.extend_from_slice(&encode_number(*begin));
+                buf.extend_from_slice(&encode_number(*length));
             }
             Message::Piece {
                 index,
                 begin,
                 chunk,
             } => {
-                let mut bytes = Vec::with_capacity(4 + 1 + 4 + 4 + chunk.len());
-                bytes.extend_from_slice(&encode_number(1 + 4 + 4 + chunk.len() as u32));
-                bytes.push(PIECE);
-                bytes.extend_from_slice(&encode_number(index));
-                bytes.extend_from_slice(&encode_number(begin));
-                bytes.extend_from_slice(&chunk);
-                bytes
+                buf.put_u8(PIECE);
+                buf.extend_from_slice(&encode_number(*index));
+                buf.extend_from_slice(&encode_number(*begin));
+                buf.extend_from_slice(chunk);
             }
             Message::Cancel {
                 index,
                 begin,
                 length,
             } => {
-                let mut bytes = Vec::with_capacity(4 + 1 + 4 + 4 + 4);
-                bytes.extend_from_slice(&encode_number(13));
-                bytes.push(CANCEL);
-                bytes.extend_from_slice(&encode_number(index));
-                bytes.extend_from_slice(&encode_number(begin));
-                bytes.extend_from_slice(&encode_number(length));
-                bytes
+                buf.put_u8(CANCEL);
+                buf.extend_from_slice(&encode_number(*index));
+                buf.extend_from_slice(&encode_number(*begin));
+                buf.extend_from_slice(&encode_number(*length));
             }
         }
     }
@@ -390,6 +307,68 @@ impl TryFrom<Vec<u8>> for Message {
             }
             _ => Err("Could not decode bencoded peer message".to_string()),
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct MessageCodec;
+
+// ideally, this should be split into two codecs:
+// one for the handshake and one for the regular frames
+impl tokio_util::codec::Decoder for MessageCodec {
+    type Item = Message;
+
+    type Error = std::io::Error;
+
+    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < 4 {
+            // Not enough data to read length marker.
+            return Ok(None);
+        }
+
+        // Read length marker.
+        let mut length_bytes = [0u8; 4];
+        length_bytes.copy_from_slice(&src[..4]);
+        let length = u32::from_be_bytes(length_bytes) as usize;
+
+        // Check that the length is not too large to avoid a denial of
+        // service attack where the server runs out of memory.
+        if length > MAX_MESSAGE_LENGTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Frame of length {} is too large.", length),
+            ));
+        }
+
+        if src.len() < 4 + length {
+            // The full string has not yet arrived.
+            //
+            // We reserve more space in the buffer. This is not strictly
+            // necessary, but is a good idea performance-wise.
+            src.reserve(4 + length - src.len());
+
+            // We inform the Framed that we need more bytes to form the next
+            // frame.
+            return Ok(None);
+        }
+        // Use advance to modify src such that it no longer contains
+        // this frame.
+        let data = src[4..4 + length].to_vec();
+        src.advance(4 + length);
+
+        let message = Message::try_from(data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        Ok(Some(message))
+    }
+}
+
+impl tokio_util::codec::Encoder<Message> for MessageCodec {
+    type Error = std::io::Error;
+
+    fn encode(&mut self, item: Message, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        item.write_to_bytes(dst);
+        Ok(())
     }
 }
 
@@ -468,351 +447,379 @@ mod tests {
     use super::*;
     use bitvec::prelude::*;
 
-    #[test]
-    fn encode_numbers() {
-        assert_eq!(encode_number(10), [0, 0, 0, 10]);
-        assert_eq!(encode_number(u32::MIN), [0, 0, 0, 0]);
-        assert_eq!(encode_number(u32::MAX), [255, 255, 255, 255]);
+    mod helpers {
+        use super::*;
+
+        pub(crate) fn encode(message: Message) -> Vec<u8> {
+            let mut codec = MessageCodec;
+            let mut buf = BytesMut::new();
+            codec.encode(message, &mut buf).unwrap();
+            buf.to_vec()
+        }
+
+        pub(crate) fn decode(bytes: &[u8]) -> Message {
+            let mut bytes = BytesMut::from(bytes);
+            let mut codec = MessageCodec;
+            codec.decode(&mut bytes).unwrap().unwrap()
+        }
     }
 
-    #[test]
-    fn encode_keepalive() {
-        let m = Message::Keepalive;
-        let encoded: Vec<u8> = m.into();
-        assert_eq!(encoded, Vec::<u8>::new());
-    }
+    mod encoding {
+        use super::helpers::encode;
+        use super::*;
 
-    #[test]
-    fn encode_choke() {
-        let m = Message::Choke;
-        let encoded: Vec<u8> = m.into();
-        assert_eq!(encoded, vec![0, 0, 0, 1, CHOKE]);
-    }
+        #[test]
+        fn encode_numbers() {
+            assert_eq!(encode_number(10), [0, 0, 0, 10]);
+            assert_eq!(encode_number(u32::MIN), [0, 0, 0, 0]);
+            assert_eq!(encode_number(u32::MAX), [255, 255, 255, 255]);
+        }
 
-    #[test]
-    fn encode_unchoke() {
-        let m = Message::Unchoke;
-        let encoded: Vec<u8> = m.into();
-        assert_eq!(encoded, vec![0, 0, 0, 1, UNCHOKE]);
-    }
+        #[test]
+        fn encode_keepalive() {
+            let encoded = encode(Message::Keepalive);
+            assert_eq!(encoded, vec![0, 0, 0, 0]);
+        }
 
-    #[test]
-    fn encode_interested() {
-        let m = Message::Interested;
-        let encoded: Vec<u8> = m.into();
-        assert_eq!(encoded, vec![0, 0, 0, 1, INTERESTED]);
-    }
+        #[test]
+        fn encode_choke() {
+            let encoded = encode(Message::Choke);
+            assert_eq!(encoded, vec![0, 0, 0, 1, CHOKE]);
+        }
 
-    #[test]
-    fn encode_not_interested() {
-        let m = Message::NotInterested;
-        let encoded: Vec<u8> = m.into();
-        assert_eq!(encoded, vec![0, 0, 0, 1, NOT_INTERESTED]);
-    }
+        #[test]
+        fn encode_unchoke() {
+            let encoded = encode(Message::Unchoke);
+            assert_eq!(encoded, vec![0, 0, 0, 1, UNCHOKE]);
+        }
 
-    #[test]
-    fn encode_have() {
-        let m = Message::Have { index: 63 };
-        let encoded: Vec<u8> = m.into();
+        #[test]
+        fn encode_interested() {
+            let encoded = encode(Message::Interested);
+            assert_eq!(encoded, vec![0, 0, 0, 1, INTERESTED]);
+        }
 
-        let mut expected = vec![];
+        #[test]
+        fn encode_not_interested() {
+            let encoded = encode(Message::NotInterested);
+            assert_eq!(encoded, vec![0, 0, 0, 1, NOT_INTERESTED]);
+        }
 
-        let expected_index = encode_number(63);
+        #[test]
+        fn encode_have() {
+            let message = Message::Have { index: 63 };
+            let encoded = encode(message);
 
-        expected.extend_from_slice(&encode_number(1 + expected_index.len() as u32));
-        expected.push(HAVE);
-        expected.extend_from_slice(&expected_index);
+            let mut expected = vec![];
 
-        assert_eq!(encoded, expected);
-    }
+            let expected_index = encode_number(63);
 
-    #[test]
-    fn encode_bitfield() {
-        let bitfield = Bitfield(bitvec![Msb0, u8; 0, 0, 0, 1, 0, 1, 0, 0]);
-        let bitfield_as_bytes = bitfield.as_raw_slice().to_vec();
+            expected.extend_from_slice(&encode_number(1 + expected_index.len() as u32));
+            expected.push(HAVE);
+            expected.extend_from_slice(&expected_index);
 
-        let m = Message::Bitfield { bitfield };
+            assert_eq!(encoded, expected);
+        }
 
-        let encoded: Vec<u8> = m.into();
+        #[test]
+        fn encode_bitfield() {
+            let bitfield = Bitfield(bitvec![Msb0, u8; 0, 0, 0, 1, 0, 1, 0, 0]);
+            let bitfield_as_bytes = bitfield.as_raw_slice().to_vec();
 
-        let mut expected = vec![];
-        expected.extend_from_slice(&encode_number(1 + bitfield_as_bytes.len() as u32));
-        expected.push(BITFIELD);
-        expected.extend_from_slice(&bitfield_as_bytes);
+            let message = Message::Bitfield { bitfield };
 
-        assert_eq!(encoded, expected);
-    }
+            let encoded = encode(message);
 
-    #[test]
-    fn encode_request() {
-        let index = 11;
-        let begin = 0;
-        let length = 2u32.pow(14);
+            let mut expected = vec![];
+            expected.extend_from_slice(&encode_number(1 + bitfield_as_bytes.len() as u32));
+            expected.push(BITFIELD);
+            expected.extend_from_slice(&bitfield_as_bytes);
 
-        let m = Message::Request {
-            index,
-            begin,
-            length,
-        };
+            assert_eq!(encoded, expected);
+        }
 
-        let encoded: Vec<u8> = m.into();
+        #[test]
+        fn encode_request() {
+            let index = 11;
+            let begin = 0;
+            let length = 2u32.pow(14);
 
-        let expected_index = encode_number(index);
-        let expected_begin = encode_number(begin);
-        let expected_length = encode_number(length);
-
-        let mut expected = vec![];
-
-        expected.extend_from_slice(&encode_number(
-            1 + expected_index.len() as u32
-                + expected_begin.len() as u32
-                + expected_length.len() as u32,
-        ));
-        expected.push(REQUEST);
-        expected.extend_from_slice(&expected_index);
-        expected.extend_from_slice(&expected_begin);
-        expected.extend_from_slice(&expected_length);
-
-        assert_eq!(encoded, expected);
-    }
-
-    #[test]
-    fn encode_piece() {
-        let index = 31;
-        let begin = 2u32.pow(14);
-        let chunk = vec![1; 2usize.pow(14)];
-        let cloned_chunk = chunk.clone();
-
-        let m = Message::Piece {
-            index,
-            begin,
-            chunk,
-        };
-
-        let encoded: Vec<u8> = m.into();
-
-        let expected_index = encode_number(index);
-        let expected_begin = encode_number(begin);
-
-        let mut expected = vec![];
-
-        expected.extend_from_slice(&encode_number(
-            1 + expected_index.len() as u32
-                + expected_begin.len() as u32
-                + cloned_chunk.len() as u32,
-        ));
-        expected.push(PIECE);
-        expected.extend_from_slice(&expected_index);
-        expected.extend_from_slice(&expected_begin);
-        expected.extend_from_slice(&cloned_chunk);
-
-        assert_eq!(encoded, expected);
-    }
-
-    #[test]
-    fn encode_cancel() {
-        let index = 11;
-        let begin = 0;
-        let length = 2u32.pow(14);
-
-        let m = Message::Cancel {
-            index,
-            begin,
-            length,
-        };
-
-        let encoded: Vec<u8> = m.into();
-
-        let expected_index = encode_number(index);
-        let expected_begin = encode_number(begin);
-        let expected_length = encode_number(length);
-
-        let mut expected = vec![];
-
-        expected.extend_from_slice(&encode_number(
-            1 + expected_index.len() as u32
-                + expected_begin.len() as u32
-                + expected_length.len() as u32,
-        ));
-        expected.push(CANCEL);
-        expected.extend_from_slice(&expected_index);
-        expected.extend_from_slice(&expected_begin);
-        expected.extend_from_slice(&expected_length);
-
-        assert_eq!(encoded, expected);
-    }
-
-    #[test]
-    fn encode_handshake() {
-        let peer_id = PeerId([
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ]);
-        let info_hash = InfoHash([
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ]);
-
-        let m = Handshake {
-            protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
-            peer_id,
-            info_hash,
-        };
-
-        let encoded: Vec<u8> = m.into();
-
-        let mut expected = vec![];
-
-        expected.push(19);
-        expected.extend_from_slice(&BITTORRENT_PROTOCOL);
-        expected.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
-        expected.extend_from_slice(peer_id.as_ref());
-        expected.extend_from_slice(&info_hash.as_ref());
-
-        assert_eq!(encoded, expected);
-    }
-
-    #[test]
-    fn decode_keepalive() {
-        let m = vec![];
-        assert_eq!(Message::try_from(m).unwrap(), Message::Keepalive);
-    }
-
-    #[test]
-    fn decode_choke() {
-        let m = vec![CHOKE];
-        assert_eq!(Message::try_from(m).unwrap(), Message::Choke);
-    }
-
-    #[test]
-    fn decode_unchoke() {
-        let m = vec![UNCHOKE];
-        assert_eq!(Message::try_from(m).unwrap(), Message::Unchoke);
-    }
-
-    #[test]
-    fn decode_interested() {
-        let m = vec![INTERESTED];
-        assert_eq!(Message::try_from(m).unwrap(), Message::Interested);
-    }
-
-    #[test]
-    fn decode_not_interested() {
-        let m = vec![NOT_INTERESTED];
-        assert_eq!(Message::try_from(m).unwrap(), Message::NotInterested);
-    }
-
-    #[test]
-    fn decode_have() {
-        let m = vec![HAVE, 0, 0, 0, 44];
-        assert_eq!(Message::try_from(m).unwrap(), Message::Have { index: 44 });
-    }
-
-    #[test]
-    fn decode_bitfield() {
-        let bitfield = Bitfield(bitvec![Msb0, u8; 0, 0, 1, 0, 1, 0, 0, 0]);
-        let m = vec![BITFIELD, 40];
-        assert_eq!(
-            Message::try_from(m).unwrap(),
-            Message::Bitfield { bitfield }
-        );
-    }
-
-    #[test]
-    fn decode_request() {
-        let mut m = vec![];
-
-        let index = 11;
-        let begin = 0;
-        let length = 2u32.pow(14);
-
-        m.push(REQUEST);
-        m.extend_from_slice(&encode_number(index));
-        m.extend_from_slice(&encode_number(begin));
-        m.extend_from_slice(&encode_number(length));
-
-        assert_eq!(
-            Message::try_from(m).unwrap(),
-            Message::Request {
+            let message = Message::Request {
                 index,
                 begin,
-                length
-            }
-        )
-    }
+                length,
+            };
 
-    #[test]
-    fn decode_piece() {
-        let mut m = vec![];
+            let encoded = encode(message);
 
-        let index = 31;
-        let begin = 2u32.pow(14);
-        let chunk = vec![1; 2usize.pow(14)];
-        let cloned_chunk = chunk.clone();
+            let expected_index = encode_number(index);
+            let expected_begin = encode_number(begin);
+            let expected_length = encode_number(length);
 
-        let expected_index = encode_number(index);
-        let expected_begin = encode_number(begin);
+            let mut expected = vec![];
 
-        m.push(PIECE);
-        m.extend_from_slice(&expected_index);
-        m.extend_from_slice(&expected_begin);
-        m.extend_from_slice(&cloned_chunk);
+            expected.extend_from_slice(&encode_number(
+                1 + expected_index.len() as u32
+                    + expected_begin.len() as u32
+                    + expected_length.len() as u32,
+            ));
+            expected.push(REQUEST);
+            expected.extend_from_slice(&expected_index);
+            expected.extend_from_slice(&expected_begin);
+            expected.extend_from_slice(&expected_length);
 
-        assert_eq!(
-            Message::try_from(m).unwrap(),
-            Message::Piece {
+            assert_eq!(encoded, expected);
+        }
+
+        #[test]
+        fn encode_piece() {
+            let index = 31;
+            let begin = 2u32.pow(14);
+            let chunk = vec![1; 2usize.pow(14)];
+            let cloned_chunk = chunk.clone();
+
+            let message = Message::Piece {
                 index,
                 begin,
-                chunk
-            }
-        )
-    }
+                chunk,
+            };
 
-    #[test]
-    fn decode_cancel() {
-        let mut m = vec![];
+            let encoded = encode(message);
 
-        let index = 11;
-        let begin = 0;
-        let length = 2u32.pow(14);
+            let expected_index = encode_number(index);
+            let expected_begin = encode_number(begin);
 
-        m.push(CANCEL);
-        m.extend_from_slice(&encode_number(index));
-        m.extend_from_slice(&encode_number(begin));
-        m.extend_from_slice(&encode_number(length));
+            let mut expected = vec![];
 
-        assert_eq!(
-            Message::try_from(m).unwrap(),
-            Message::Cancel {
+            expected.extend_from_slice(&encode_number(
+                1 + expected_index.len() as u32
+                    + expected_begin.len() as u32
+                    + cloned_chunk.len() as u32,
+            ));
+            expected.push(PIECE);
+            expected.extend_from_slice(&expected_index);
+            expected.extend_from_slice(&expected_begin);
+            expected.extend_from_slice(&cloned_chunk);
+
+            assert_eq!(encoded, expected);
+        }
+
+        #[test]
+        fn encode_cancel() {
+            let index = 11;
+            let begin = 0;
+            let length = 2u32.pow(14);
+
+            let message = Message::Cancel {
                 index,
                 begin,
-                length
-            }
-        )
-    }
+                length,
+            };
 
-    #[test]
-    fn decode_handshake() {
-        let mut m = vec![];
+            let encoded = encode(message);
 
-        let peer_id = PeerId([
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ]);
-        let info_hash = InfoHash([
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ]);
+            let expected_index = encode_number(index);
+            let expected_begin = encode_number(begin);
+            let expected_length = encode_number(length);
 
-        m.push(19);
-        m.extend_from_slice(BITTORRENT_PROTOCOL);
-        m.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
-        m.extend_from_slice(peer_id.as_ref());
-        m.extend_from_slice(info_hash.as_ref());
-        assert_eq!(
-            Handshake::try_from(m).unwrap(),
-            Handshake {
+            let mut expected = vec![];
+
+            expected.extend_from_slice(&encode_number(
+                1 + expected_index.len() as u32
+                    + expected_begin.len() as u32
+                    + expected_length.len() as u32,
+            ));
+            expected.push(CANCEL);
+            expected.extend_from_slice(&expected_index);
+            expected.extend_from_slice(&expected_begin);
+            expected.extend_from_slice(&expected_length);
+
+            assert_eq!(encoded, expected);
+        }
+
+        #[test]
+        fn encode_handshake() {
+            let peer_id = PeerId([
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            ]);
+            let info_hash = InfoHash([
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            ]);
+
+            let message = Handshake {
                 protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
                 peer_id,
-                info_hash
-            }
-        );
+                info_hash,
+            };
+
+            let mut codec = HandshakeCodec;
+            let mut buf = BytesMut::new();
+            codec.encode(message, &mut buf).unwrap();
+            let encoded = buf.to_vec();
+
+            let mut expected = vec![];
+
+            expected.push(19);
+            expected.extend_from_slice(&BITTORRENT_PROTOCOL);
+            expected.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
+            expected.extend_from_slice(peer_id.as_ref());
+            expected.extend_from_slice(&info_hash.as_ref());
+
+            assert_eq!(encoded, expected);
+        }
+    }
+
+    mod decoding {
+        use super::helpers::decode;
+        use super::*;
+
+        #[test]
+        fn decode_keepalive() {
+            let buf = vec![0, 0, 0, 0];
+            assert_eq!(decode(&buf), Message::Keepalive);
+        }
+
+        #[test]
+        fn decode_choke() {
+            let buf = vec![0, 0, 0, 1, CHOKE];
+            assert_eq!(decode(&buf), Message::Choke);
+        }
+
+        #[test]
+        fn decode_unchoke() {
+            let buf = vec![0, 0, 0, 1, UNCHOKE];
+            assert_eq!(decode(&buf), Message::Unchoke);
+        }
+
+        #[test]
+        fn decode_interested() {
+            let buf = vec![0, 0, 0, 1, INTERESTED];
+            assert_eq!(decode(&buf), Message::Interested);
+        }
+
+        #[test]
+        fn decode_not_interested() {
+            let buf = vec![0, 0, 0, 1, NOT_INTERESTED];
+            assert_eq!(decode(&buf), Message::NotInterested);
+        }
+
+        #[test]
+        fn decode_have() {
+            let buf = vec![0, 0, 0, 5, HAVE, 0, 0, 0, 44];
+            assert_eq!(decode(&buf), Message::Have { index: 44 });
+        }
+
+        #[test]
+        fn decode_bitfield() {
+            let bitfield = Bitfield(bitvec![Msb0, u8; 0, 0, 1, 0, 1, 0, 0, 0]);
+            let buf = vec![0, 0, 0, 2, BITFIELD, 40];
+            assert_eq!(decode(&buf), Message::Bitfield { bitfield });
+        }
+
+        #[test]
+        fn decode_request() {
+            let index = 11;
+            let begin = 0;
+            let length = 2u32.pow(14);
+
+            let mut buf = vec![0, 0, 0, 13];
+
+            buf.push(REQUEST);
+            buf.extend_from_slice(&encode_number(index));
+            buf.extend_from_slice(&encode_number(begin));
+            buf.extend_from_slice(&encode_number(length));
+
+            assert_eq!(
+                decode(&buf),
+                Message::Request {
+                    index,
+                    begin,
+                    length
+                }
+            )
+        }
+
+        #[test]
+        fn decode_piece() {
+            let index = 31;
+            let begin = 2u32.pow(14);
+            let chunk = vec![1; 2usize.pow(14)];
+            let cloned_chunk = chunk.clone();
+
+            let expected_index = encode_number(index);
+            let expected_begin = encode_number(begin);
+
+            let mut buf = vec![];
+
+            buf.extend_from_slice(&encode_number(1 + 4 + 4 + chunk.len() as u32));
+            buf.push(PIECE);
+            buf.extend_from_slice(&expected_index);
+            buf.extend_from_slice(&expected_begin);
+            buf.extend_from_slice(&cloned_chunk);
+
+            assert_eq!(
+                decode(&buf),
+                Message::Piece {
+                    index,
+                    begin,
+                    chunk
+                }
+            )
+        }
+
+        #[test]
+        fn decode_cancel() {
+            let index = 11;
+            let begin = 0;
+            let length = 2u32.pow(14);
+
+            let mut buf = vec![];
+
+            buf.extend_from_slice(&encode_number(1 + 4 + 4 + 4));
+            buf.push(CANCEL);
+            buf.extend_from_slice(&encode_number(index));
+            buf.extend_from_slice(&encode_number(begin));
+            buf.extend_from_slice(&encode_number(length));
+
+            assert_eq!(
+                decode(&buf),
+                Message::Cancel {
+                    index,
+                    begin,
+                    length
+                }
+            )
+        }
+
+        #[test]
+        fn decode_handshake() {
+            let peer_id = PeerId([
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            ]);
+            let info_hash = InfoHash([
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            ]);
+
+            let mut m = vec![];
+            let mut codec = HandshakeCodec;
+
+            m.push(19);
+            m.extend_from_slice(BITTORRENT_PROTOCOL);
+            m.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
+            m.extend_from_slice(peer_id.as_ref());
+            m.extend_from_slice(info_hash.as_ref());
+
+            let mut buf = BytesMut::from(m.as_slice());
+
+            assert_eq!(
+                codec.decode(&mut buf).unwrap().unwrap(),
+                Handshake {
+                    protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
+                    peer_id,
+                    info_hash
+                }
+            );
+        }
     }
 
     const THIRTY_TWO_K: usize = 2usize.pow(15);
