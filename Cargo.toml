@@ -7,8 +7,17 @@ edition = "2018"
 
 [dependencies]
 bitvec = "0.22"
+bytes = "1"
+futures-util = { version = "0.3", features = ["sink"] }
 hex = "0.4"
-nom_bencode = { git = "https://github.com/ckampfe/nom_bencode" }
+# nom_bencode = { git = "https://github.com/ckampfe/nom_bencode", branch = "display" }
+# nom_bencode = { path = "/Users/clark/code/nom_bencode" }
+nom_bencode = { path = "/home/clark/code/personal/nom_bencode" }
+percent-encoding = "2.1"
+rand = "0.8"
 reqwest = "0.11"
-tokio = { version = "1", features = ["full"] }
 sha-1 = "0.9"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.6"
+tracing = "0.1"
+tracing-futures = "0.2"

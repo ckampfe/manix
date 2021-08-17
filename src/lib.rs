@@ -1,99 +1,92 @@
-use crate::torrent::Torrent;
-use std::{collections::BTreeMap, io::Read, path::Path};
+use async_client::AsyncClient;
+use blocking_client::BlockingClient;
+use std::fmt::Display;
 
+pub mod async_client;
+pub mod blocking_client;
+mod handshake_peer;
 mod listener;
+mod metainfo;
 mod peer;
 mod peer_protocol;
+mod signals;
 pub mod torrent;
 
 type Index = u32;
 type Begin = u32;
 type Length = u32;
 type Port = u16;
-type InfoHash = [u8; 20];
-type PeerId = [u8; 20];
 
-pub struct Manix {
-    torrents: BTreeMap<String, Torrent>,
+pub fn async_client(options: Options) -> AsyncClient {
+    AsyncClient::new(options)
 }
 
-impl Manix {
-    pub fn new() -> Self {
+pub fn blocking_client(options: Options) -> BlockingClient {
+    BlockingClient::new(options)
+}
+
+pub struct Options {
+    global_max_peer_connections: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
         Self {
-            torrents: BTreeMap::new(),
+            global_max_peer_connections: 500,
         }
     }
+}
 
-    pub fn add_torrent(&mut self, path: &Path) -> Result<&Torrent, std::io::Error> {
-        // open .torrent file
-        let mut dot_torrent = std::fs::File::open(path)?;
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct PeerId([u8; 20]);
 
-        // read .torrent file
-        let mut buf = vec![];
-        dot_torrent.read_to_end(&mut buf)?;
-
-        // decode .torrent file
-        let dot_torrent_bencode = nom_bencode::decode(&buf).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{:?}", e))
-        })?;
-        // validate it
-        let options = torrent::TorrentOptions::default();
-        let torrent = Torrent::new(options, dot_torrent_bencode)?;
-        // has it already been loaded?
-        if let std::collections::btree_map::Entry::Vacant(e) =
-            self.torrents.entry(torrent.get_info_hash_human())
-        {
-            // if not, add it and return a reference to its Torrent
-            Ok(e.insert(torrent))
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "{:?} (info_hash {}) already exists",
-                    path.as_os_str(),
-                    torrent.get_info_hash_human()
-                ),
-            ));
-        } else {
-            // if not, add it
-            let cloned_key = human_readable_info_hash.clone();
-            self.torrents.insert(human_readable_info_hash, torrent);
-            // return its info hash
-            Ok(self.torrents.get(&cloned_key).unwrap())
-        }
+impl PeerId {
+    pub fn human_readable(&self) -> String {
+        self.to_string()
     }
+}
 
-    fn get_torrent_mut(&mut self, info_hash: &str) -> Result<&mut Torrent, std::io::Error> {
-        let torrent = self.torrents.get_mut(info_hash);
-        if let Some(torrent) = torrent {
-            Ok(torrent)
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Could not find torrent for info hash {}", info_hash),
-            ))
-        }
+impl Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "{}",
+            std::str::from_utf8(&self.0)
+                .expect("peer ids must be valid UTF-8")
+                .to_string()
+        )
     }
+}
 
-    pub fn start_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
-        let torrent = self.get_torrent_mut(info_hash)?;
-        torrent.start()
+impl From<[u8; 20]> for PeerId {
+    fn from(bytes: [u8; 20]) -> Self {
+        Self(bytes)
     }
+}
 
-    pub fn pause_torrent(&mut self, info_hash: &str) -> Result<(), std::io::Error> {
-        let torrent = self.get_torrent_mut(info_hash)?;
-        torrent.pause()
+impl AsRef<[u8]> for PeerId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
+}
 
-    pub fn delete_torrent(&mut self, info_hash: &str) -> Option<Torrent> {
-        self.torrents.remove(info_hash)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InfoHash([u8; 20]);
+
+impl InfoHash {
+    pub fn human_readable(&self) -> String {
+        hex::encode(self.as_ref())
     }
+}
 
-    pub fn delete_data(&mut self, info_hash: &str) {
-        todo!()
+impl From<[u8; 20]> for InfoHash {
+    fn from(bytes: [u8; 20]) -> Self {
+        Self(bytes)
     }
+}
 
-    pub fn list_torrents(&self) -> Vec<Torrent> {
-        todo!()
+impl AsRef<[u8]> for InfoHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
