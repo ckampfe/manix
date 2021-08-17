@@ -40,7 +40,6 @@ pub struct Torrent {
     meta_info: MetaInfo,
     torrent_data: PathBuf,
     peers: HashMap<PeerId, PeerState>,
-    status: Status,
     port: Port,
     uploaded: usize,
     downloaded: usize,
@@ -71,8 +70,6 @@ impl Torrent {
         info!("metainfo reports length of {}", meta_info.info.piece_length);
         let pieces_bitfield = peer_protocol::Bitfield::new(meta_info.info.pieces.len());
 
-        let status = Status::Leeching;
-
         let torrent_max_peer_connections =
             Arc::new(tokio::sync::Semaphore::new(options.max_peer_connections));
 
@@ -91,7 +88,6 @@ impl Torrent {
             meta_info,
             torrent_data,
             peers,
-            status,
             port: options.port,
             uploaded: 0,
             downloaded: 0,
@@ -112,17 +108,10 @@ impl Torrent {
     pub(crate) async fn start(&mut self) -> Result<(), std::io::Error> {
         self.validate_torrent_data().await?;
 
-        let have_pieces_len = self.pieces_bitfield.count_ones();
-        info!("Have {} pieces", have_pieces_len);
-        let done = have_pieces_len == self.pieces_bitfield.len();
-
-        if done {
-            self.status = Status::Seeding;
-            self.announce(AnnounceEvent::Completed).await?;
-        } else {
-            self.status = Status::Leeching;
-            self.announce(AnnounceEvent::Started).await?;
-        }
+        match self.get_status().await {
+            Status::Leeching => self.announce(AnnounceEvent::Started).await?,
+            Status::Seeding => self.announce(AnnounceEvent::Completed).await?,
+        };
 
         let listener_options = listener::ListenerOptions {
             address: "127.0.0.1:6881".to_string(),
@@ -413,7 +402,7 @@ impl Torrent {
                     }
                 }
                 _ = announce_timer.tick() => {
-                    match self.status {
+                    match self.get_status().await {
                         Status::Leeching => {
                             self.announce(AnnounceEvent::Empty).await?;
                         },
@@ -423,10 +412,6 @@ impl Torrent {
                     }
                 }
                 _ = assessment_timer.tick() => {
-                    // are we seeding or leeching?
-                    let have_pieces_len = self.pieces_bitfield.count_ones();
-                    let done = have_pieces_len == self.pieces_bitfield.len();
-
                     // TODO this should be somehow worked into a semaphore,
                     // and we can acquire a specific number of permits that will
                     // implement rate limiting. Right now it is a magic constant.
@@ -434,12 +419,8 @@ impl Torrent {
                     // ex: GLOBAL_DOWNLOAD_ALLOWANCE = N_GLOBAL_DL_PERMITS * PIECE_SIZE
                     let number_of_pieces_to_download = 5;
 
-                    match self.status {
+                    match self.get_status().await {
                         Status::Leeching => {
-                            if done {
-                                self.status = Status::Seeding;
-                                continue;
-                            }
                             // find some indexes we don't yet have
                             let unhad_piece_indexes: Vec<usize> = self.random_unhad_piece_indexes(number_of_pieces_to_download).await;
                             // find some peers who have them
@@ -453,12 +434,7 @@ impl Torrent {
                             }
                         }
                         Status::Seeding => {
-                            if !done {
-                                self.status = Status::Leeching;
-                                continue;
-                            }
                             // chill and wait for people to ask us for pieces
-
                             // if we somehow lose pieces, set status to leeching,
                             // and begin downloading again
                         }
@@ -514,6 +490,15 @@ impl Torrent {
             announce_timer,
             assessment_timer,
             debug_timer,
+        }
+    }
+
+    async fn get_status(&self) -> Status {
+        let have_pieces_len = self.pieces_bitfield.count_ones();
+        if have_pieces_len == self.pieces_bitfield.len() {
+            Status::Seeding
+        } else {
+            Status::Leeching
         }
     }
 
