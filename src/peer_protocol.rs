@@ -114,17 +114,6 @@ impl tokio_util::codec::Encoder<Handshake> for HandshakeCodec {
     }
 }
 
-pub(crate) fn set_codec<T: AsyncRead + AsyncWrite, C1, E, C2: Encoder<E> + Decoder>(
-    framed: Framed<T, C1>,
-    codec: C2,
-) -> Framed<T, C2> {
-    let parts1 = framed.into_parts();
-    let mut parts2 = Framed::new(parts1.io, codec).into_parts();
-    parts2.read_buf = parts1.read_buf;
-    parts2.write_buf = parts1.write_buf;
-    Framed::from_parts(parts2)
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Message {
     /// no tag byte
@@ -425,7 +414,6 @@ pub(crate) fn chunk_offsets_lengths(
     let mut offsets = vec![];
 
     let chunks_per_piece = piece_length / chunk_length;
-    dbg!(chunks_per_piece);
 
     while i < chunks_per_piece {
         let offset = chunk_length * i;
@@ -440,6 +428,17 @@ pub(crate) fn chunk_offsets_lengths(
     }
 
     offsets
+}
+
+pub(crate) fn set_codec<T: AsyncRead + AsyncWrite, C1, E, C2: Encoder<E> + Decoder>(
+    framed: Framed<T, C1>,
+    codec: C2,
+) -> Framed<T, C2> {
+    let parts1 = framed.into_parts();
+    let mut parts2 = Framed::new(parts1.io, codec).into_parts();
+    parts2.read_buf = parts1.read_buf;
+    parts2.write_buf = parts1.write_buf;
+    Framed::from_parts(parts2)
 }
 
 #[cfg(test)]
