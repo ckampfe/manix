@@ -1,7 +1,7 @@
 use crate::listener::{self, Listener};
 use crate::metainfo::MetaInfo;
 use crate::InfoHash;
-use crate::{messages, peer_protocol};
+use crate::{peer_protocol, signals};
 use crate::{PeerId, Port};
 use rand::prelude::IteratorRandom;
 use rand::{thread_rng, Rng};
@@ -31,7 +31,7 @@ impl Default for TorrentOptions {
 
 #[derive(Debug)]
 struct PeerState {
-    torrent_to_peer_tx: tokio::sync::mpsc::Sender<messages::TorrentToPeer>,
+    torrent_to_peer_tx: tokio::sync::mpsc::Sender<signals::TorrentToPeer>,
 }
 
 #[derive(Debug)]
@@ -49,8 +49,8 @@ pub struct Torrent {
     listener: Option<Listener<String>>,
     global_max_peer_connections: Arc<tokio::sync::Semaphore>,
     torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
-    peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
-    peer_to_torrent_rx: tokio::sync::mpsc::Receiver<messages::PeerToTorrent>,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<signals::PeerToTorrent>,
+    peer_to_torrent_rx: tokio::sync::mpsc::Receiver<signals::PeerToTorrent>,
     event_loop_interrupt_tx: Option<tokio::sync::oneshot::Sender<()>>,
     chunk_length: usize,
 }
@@ -371,7 +371,7 @@ impl Torrent {
                 message = self.peer_to_torrent_rx.recv() => {
                     match message {
                         Some(message) => match message {
-                            messages::PeerToTorrent::Register { remote_peer_id, torrent_to_peer_tx } => {
+                            signals::PeerToTorrent::Register { remote_peer_id, torrent_to_peer_tx } => {
                                 let peer_state = PeerState {
                                     torrent_to_peer_tx,
                                 };
@@ -380,17 +380,17 @@ impl Torrent {
 
                                 info!("registered remote peer {}", remote_peer_id);
                             },
-                            messages::PeerToTorrent::Deregister { remote_peer_id } => {
+                            signals::PeerToTorrent::Deregister { remote_peer_id } => {
                                 info!("deregistered remote peer {}", remote_peer_id);
                                 self.peer_not_have(remote_peer_id).await;
                                 self.peers.remove(&remote_peer_id);
                             },
-                            messages::PeerToTorrent::RequestBitfield { remote_peer_id: _, responder } => {
+                            signals::PeerToTorrent::RequestBitfield { remote_peer_id: _, responder } => {
                                 responder.send(
                                         self.pieces_bitfield.clone()
                                 ).map_err(|_e| std::io::Error::new(std::io::ErrorKind::Other, "TODO actually handle this torrent to peer send error"))?;
                             }
-                            messages::PeerToTorrent::Bitfield { remote_peer_id, bitfield } => {
+                            signals::PeerToTorrent::Bitfield { remote_peer_id, bitfield } => {
                                 info!("received bitfield from {}", remote_peer_id);
                                 for index in bitfield.iter_ones() {
                                     self.peer_have(index.try_into().unwrap(), remote_peer_id).await;
@@ -429,7 +429,7 @@ impl Torrent {
                             for (peer_id, index) in peers_with_pieces {
                                 let peer = self.peers.get(&peer_id);
                                 if let Some(peer) = peer {
-                                    peer.torrent_to_peer_tx.send(messages::TorrentToPeer::GetPiece(index)).await.expect("Actually handle failing to send a message to a peer")
+                                    peer.torrent_to_peer_tx.send(signals::TorrentToPeer::GetPiece(index)).await.expect("Actually handle failing to send a message to a peer")
                                 }
                             }
                         }

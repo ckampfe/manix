@@ -6,10 +6,10 @@ pub mod async_client;
 pub mod blocking_client;
 mod handshake_peer;
 mod listener;
-mod messages;
 mod metainfo;
 mod peer;
 mod peer_protocol;
+mod signals;
 pub mod torrent;
 
 type Index = u32;

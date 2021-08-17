@@ -2,9 +2,9 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tracing::{info, instrument};
 
-use crate::messages;
 use crate::peer::Peer;
 use crate::peer::PeerOptions;
+use crate::signals;
 use crate::{peer, peer_protocol, InfoHash, PeerId};
 
 #[derive(Debug)]
@@ -12,7 +12,7 @@ pub(crate) struct HandshakePeerOptions {
     pub(crate) socket: TcpStream,
     pub(crate) peer_id: PeerId,
     pub(crate) info_hash: InfoHash,
-    pub(crate) peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
+    pub(crate) peer_to_torrent_tx: tokio::sync::mpsc::Sender<signals::PeerToTorrent>,
     pub(crate) global_permit: tokio::sync::OwnedSemaphorePermit,
     pub(crate) torrent_permit: tokio::sync::OwnedSemaphorePermit,
     pub(crate) piece_length: usize,
@@ -23,7 +23,7 @@ pub(crate) struct HandshakePeer {
     connection: tokio_util::codec::Framed<tokio::net::TcpStream, peer_protocol::HandshakeCodec>,
     peer_id: PeerId,
     info_hash: InfoHash,
-    peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<signals::PeerToTorrent>,
     global_permit: tokio::sync::OwnedSemaphorePermit,
     torrent_permit: tokio::sync::OwnedSemaphorePermit,
     piece_length: usize,
@@ -143,9 +143,9 @@ impl HandshakePeer {
     async fn register_with_owning_torrent(
         &mut self,
         remote_peer_id: PeerId,
-    ) -> Result<tokio::sync::mpsc::Receiver<messages::TorrentToPeer>, std::io::Error> {
+    ) -> Result<tokio::sync::mpsc::Receiver<signals::TorrentToPeer>, std::io::Error> {
         let (torrent_to_peer_tx, torrent_to_peer_rx) = tokio::sync::mpsc::channel(32);
-        self.send_to_owned_torrent(messages::PeerToTorrent::Register {
+        self.send_to_owned_torrent(signals::PeerToTorrent::Register {
             remote_peer_id,
             torrent_to_peer_tx,
         })
@@ -157,7 +157,7 @@ impl HandshakePeer {
     #[instrument(skip(self))]
     async fn send_to_owned_torrent(
         &self,
-        message: messages::PeerToTorrent,
+        message: signals::PeerToTorrent,
     ) -> Result<(), std::io::Error> {
         self.peer_to_torrent_tx
             .send(message)

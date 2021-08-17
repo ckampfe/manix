@@ -1,5 +1,5 @@
 use crate::handshake_peer::{HandshakePeer, HandshakePeerOptions};
-use crate::messages;
+use crate::signals;
 use crate::{InfoHash, PeerId};
 use futures_util::TryFutureExt;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ pub(crate) struct ListenerOptions<A: ToSocketAddrs> {
     pub(crate) info_hash: InfoHash,
     pub(crate) global_max_peer_connections: Arc<tokio::sync::Semaphore>,
     pub(crate) torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
-    pub(crate) peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
+    pub(crate) peer_to_torrent_tx: tokio::sync::mpsc::Sender<signals::PeerToTorrent>,
     pub(crate) piece_length: usize,
     pub(crate) chunk_length: usize,
 }
@@ -26,7 +26,7 @@ pub(crate) struct Listener<A: ToSocketAddrs> {
     info_hash: InfoHash,
     global_max_peer_connections: Arc<tokio::sync::Semaphore>,
     torrent_max_peer_connections: Arc<tokio::sync::Semaphore>,
-    peer_to_torrent_tx: tokio::sync::mpsc::Sender<messages::PeerToTorrent>,
+    peer_to_torrent_tx: tokio::sync::mpsc::Sender<signals::PeerToTorrent>,
     listener: Option<TcpListener>,
     piece_length: usize,
     chunk_length: usize,
