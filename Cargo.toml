@@ -10,9 +10,7 @@ bitvec = "0.22"
 bytes = "1"
 futures-util = { version = "0.3", features = ["sink"] }
 hex = "0.4"
-# nom_bencode = { git = "https://github.com/ckampfe/nom_bencode", branch = "display" }
-# nom_bencode = { path = "/Users/clark/code/nom_bencode" }
-nom_bencode = { path = "/home/clark/code/personal/nom_bencode" }
+nom_bencode = { git = "https://github.com/ckampfe/nom_bencode" }
 percent-encoding = "2.1"
 rand = "0.8"
 reqwest = "0.11"
