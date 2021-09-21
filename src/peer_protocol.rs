@@ -49,12 +49,12 @@ impl Handshake {
     }
 }
 
-impl TryFrom<Vec<u8>> for Handshake {
+impl TryFrom<&[u8]> for Handshake {
     type Error = String;
 
     #[allow(clippy::many_single_char_names)]
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        match &value[..] {
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        match value {
             // '19' + "BitTorrent protocol"
             [19, b'B', b'i', b't', b'T', b'o', b'r', b'r', b'e', b'n', b't', b' ', b'p', b'r', b'o', b't', b'o', b'c', b'o', b'l', rest @ ..] =>
             {
@@ -98,7 +98,7 @@ impl tokio_util::codec::Decoder for HandshakeCodec {
 
         src.advance(HANDSHAKE_LENGTH);
 
-        let handshake = Handshake::try_from(data)
+        let handshake = Handshake::try_from(&data[..])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         Ok(Some(handshake))
@@ -638,12 +638,16 @@ mod tests {
 
         #[test]
         fn encode_handshake() {
-            let peer_id = PeerId([
-                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-            ]);
-            let info_hash = InfoHash([
-                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-            ]);
+            let peer_id = PeerId(rand::random());
+            let info_hash = InfoHash(rand::random());
+
+            let mut expected = vec![];
+
+            expected.push(19);
+            expected.extend_from_slice(&BITTORRENT_PROTOCOL);
+            expected.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
+            expected.extend_from_slice(info_hash.as_ref());
+            expected.extend_from_slice(peer_id.as_ref());
 
             let message = Handshake {
                 protocol_extension_bytes: PROTOCOL_EXTENSION_HEADER,
@@ -655,14 +659,6 @@ mod tests {
             let mut buf = BytesMut::new();
             codec.encode(message, &mut buf).unwrap();
             let encoded = buf.to_vec();
-
-            let mut expected = vec![];
-
-            expected.push(19);
-            expected.extend_from_slice(&BITTORRENT_PROTOCOL);
-            expected.extend_from_slice(&PROTOCOL_EXTENSION_HEADER);
-            expected.extend_from_slice(peer_id.as_ref());
-            expected.extend_from_slice(&info_hash.as_ref());
 
             assert_eq!(encoded, expected);
         }
